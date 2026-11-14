@@ -4,6 +4,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Serialization;
@@ -44,7 +45,7 @@ namespace MediaBrowser.Controller.LiveTv
         public override LocationType LocationType => LocationType.Remote;
 
         [JsonIgnore]
-        public override string MediaType => ChannelType == ChannelType.Radio ? Model.Entities.MediaType.Audio : Model.Entities.MediaType.Video;
+        public override MediaType MediaType => ChannelType == ChannelType.Radio ? MediaType.Audio : MediaType.Video;
 
         [JsonIgnore]
         public bool IsMovie { get; set; }
@@ -108,7 +109,7 @@ namespace MediaBrowser.Controller.LiveTv
         {
             if (double.TryParse(Number, CultureInfo.InvariantCulture, out double number))
             {
-                return string.Format(CultureInfo.InvariantCulture, "{0:00000.0}", number) + "-" + (Name ?? string.Empty);
+                return string.Format(CultureInfo.InvariantCulture, "{0:0000000000.00000}", number) + "-" + (Name ?? string.Empty);
             }
 
             return (Number ?? string.Empty) + "-" + (Name ?? string.Empty);
@@ -119,13 +120,10 @@ namespace MediaBrowser.Controller.LiveTv
             return "TvChannel";
         }
 
-        public IEnumerable<BaseItem> GetTaggedItems()
-            => Enumerable.Empty<BaseItem>();
+        public IEnumerable<BaseItem> GetTaggedItems() => [];
 
-        public override List<MediaSourceInfo> GetMediaSources(bool enablePathSubstitution)
+        public override IReadOnlyList<MediaSourceInfo> GetMediaSources(bool enablePathSubstitution)
         {
-            var list = new List<MediaSourceInfo>();
-
             var info = new MediaSourceInfo
             {
                 Id = Id.ToString("N", CultureInfo.InvariantCulture),
@@ -138,14 +136,12 @@ namespace MediaBrowser.Controller.LiveTv
                 IsInfiniteStream = RunTimeTicks is null
             };
 
-            list.Add(info);
-
-            return list;
+            return [info];
         }
 
-        public override List<MediaStream> GetMediaStreams()
+        public override IReadOnlyList<MediaStream> GetMediaStreams()
         {
-            return new List<MediaStream>();
+            return [];
         }
 
         protected override string GetInternalMetadataPath(string basePath)

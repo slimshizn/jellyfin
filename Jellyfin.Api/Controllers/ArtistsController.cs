@@ -4,8 +4,10 @@ using System.Linq;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
-using Jellyfin.Data.Entities;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -23,6 +25,7 @@ namespace Jellyfin.Api.Controllers;
 /// </summary>
 [Route("Artists")]
 [Authorize]
+[Tags("Artist")]
 public class ArtistsController : BaseJellyfinApiController
 {
     private readonly ILibraryManager _libraryManager;
@@ -84,49 +87,55 @@ public class ArtistsController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the artists.</returns>
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Obsolete("Use GetPersons")]
     public ActionResult<QueryResult<BaseItemDto>> GetArtists(
         [FromQuery] double? minCommunityRating,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] string? searchTerm,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] excludeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] includeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
         [FromQuery] bool? isFavorite,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] mediaTypes,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] genres,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] officialRatings,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] tags,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] int[] years,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] genres,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] officialRatings,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] tags,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] int[] years,
         [FromQuery] bool? enableUserData,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] string? person,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] personIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] personTypes,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] studios,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] studioIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] personIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] personTypes,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] studios,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] studioIds,
         [FromQuery] Guid? userId,
         [FromQuery] string? nameStartsWithOrGreater,
         [FromQuery] string? nameStartsWith,
         [FromQuery] string? nameLessThan,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
         [FromQuery] bool? enableImages = true,
         [FromQuery] bool enableTotalRecordCount = true)
     {
         userId = RequestHelpers.GetUserId(User, userId);
         var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
             .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
+
+        // Asking for a type filter has always implied wanting that type's counts back.
+        if (includeItemTypes.Length != 0 && !dtoOptions.ContainsField(ItemFields.ItemCounts))
+        {
+            dtoOptions.Fields = [.. dtoOptions.Fields, ItemFields.ItemCounts];
+        }
 
         User? user = null;
         BaseItem parentItem = _libraryManager.GetParentItem(parentId, userId);
 
-        if (!userId.Value.Equals(default))
+        if (!userId.IsNullOrEmpty())
         {
             user = _userManager.GetUserById(userId.Value);
         }
@@ -186,67 +195,11 @@ public class ArtistsController : BaseJellyfinApiController
             }).Where(i => i is not null).Select(i => i!.Id).ToArray();
         }
 
-        foreach (var filter in filters)
-        {
-            switch (filter)
-            {
-                case ItemFilter.Dislikes:
-                    query.IsLiked = false;
-                    break;
-                case ItemFilter.IsFavorite:
-                    query.IsFavorite = true;
-                    break;
-                case ItemFilter.IsFavoriteOrLikes:
-                    query.IsFavoriteOrLiked = true;
-                    break;
-                case ItemFilter.IsFolder:
-                    query.IsFolder = true;
-                    break;
-                case ItemFilter.IsNotFolder:
-                    query.IsFolder = false;
-                    break;
-                case ItemFilter.IsPlayed:
-                    query.IsPlayed = true;
-                    break;
-                case ItemFilter.IsResumable:
-                    query.IsResumable = true;
-                    break;
-                case ItemFilter.IsUnplayed:
-                    query.IsPlayed = false;
-                    break;
-                case ItemFilter.Likes:
-                    query.IsLiked = true;
-                    break;
-            }
-        }
+        query.ApplyFilters(filters);
 
         var result = _libraryManager.GetArtists(query);
 
-        var dtos = result.Items.Select(i =>
-        {
-            var (baseItem, itemCounts) = i;
-            var dto = _dtoService.GetItemByNameDto(baseItem, dtoOptions, null, user);
-
-            if (includeItemTypes.Length != 0)
-            {
-                dto.ChildCount = itemCounts.ItemCount;
-                dto.ProgramCount = itemCounts.ProgramCount;
-                dto.SeriesCount = itemCounts.SeriesCount;
-                dto.EpisodeCount = itemCounts.EpisodeCount;
-                dto.MovieCount = itemCounts.MovieCount;
-                dto.TrailerCount = itemCounts.TrailerCount;
-                dto.AlbumCount = itemCounts.AlbumCount;
-                dto.SongCount = itemCounts.SongCount;
-                dto.ArtistCount = itemCounts.ArtistCount;
-            }
-
-            return dto;
-        });
-
-        return new QueryResult<BaseItemDto>(
-            query.StartIndex,
-            result.TotalRecordCount,
-            dtos.ToArray());
+        return RequestHelpers.CreateQueryResult(result, dtoOptions, _dtoService, user);
     }
 
     /// <summary>
@@ -288,49 +241,55 @@ public class ArtistsController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the album artists.</returns>
     [HttpGet("AlbumArtists")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Obsolete("Use GetPersons")]
     public ActionResult<QueryResult<BaseItemDto>> GetAlbumArtists(
         [FromQuery] double? minCommunityRating,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] string? searchTerm,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] excludeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] includeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
         [FromQuery] bool? isFavorite,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] mediaTypes,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] genres,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] officialRatings,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] tags,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] int[] years,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] genres,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] officialRatings,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] tags,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] int[] years,
         [FromQuery] bool? enableUserData,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] string? person,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] personIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] personTypes,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] studios,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] studioIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] personIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] personTypes,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] studios,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] studioIds,
         [FromQuery] Guid? userId,
         [FromQuery] string? nameStartsWithOrGreater,
         [FromQuery] string? nameStartsWith,
         [FromQuery] string? nameLessThan,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
         [FromQuery] bool? enableImages = true,
         [FromQuery] bool enableTotalRecordCount = true)
     {
         userId = RequestHelpers.GetUserId(User, userId);
         var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
             .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
+
+        // Asking for a type filter has always implied wanting that type's counts back.
+        if (includeItemTypes.Length != 0 && !dtoOptions.ContainsField(ItemFields.ItemCounts))
+        {
+            dtoOptions.Fields = [.. dtoOptions.Fields, ItemFields.ItemCounts];
+        }
 
         User? user = null;
         BaseItem parentItem = _libraryManager.GetParentItem(parentId, userId);
 
-        if (!userId.Value.Equals(default))
+        if (!userId.IsNullOrEmpty())
         {
             user = _userManager.GetUserById(userId.Value);
         }
@@ -390,67 +349,11 @@ public class ArtistsController : BaseJellyfinApiController
             }).Where(i => i is not null).Select(i => i!.Id).ToArray();
         }
 
-        foreach (var filter in filters)
-        {
-            switch (filter)
-            {
-                case ItemFilter.Dislikes:
-                    query.IsLiked = false;
-                    break;
-                case ItemFilter.IsFavorite:
-                    query.IsFavorite = true;
-                    break;
-                case ItemFilter.IsFavoriteOrLikes:
-                    query.IsFavoriteOrLiked = true;
-                    break;
-                case ItemFilter.IsFolder:
-                    query.IsFolder = true;
-                    break;
-                case ItemFilter.IsNotFolder:
-                    query.IsFolder = false;
-                    break;
-                case ItemFilter.IsPlayed:
-                    query.IsPlayed = true;
-                    break;
-                case ItemFilter.IsResumable:
-                    query.IsResumable = true;
-                    break;
-                case ItemFilter.IsUnplayed:
-                    query.IsPlayed = false;
-                    break;
-                case ItemFilter.Likes:
-                    query.IsLiked = true;
-                    break;
-            }
-        }
+        query.ApplyFilters(filters);
 
         var result = _libraryManager.GetAlbumArtists(query);
 
-        var dtos = result.Items.Select(i =>
-        {
-            var (baseItem, itemCounts) = i;
-            var dto = _dtoService.GetItemByNameDto(baseItem, dtoOptions, null, user);
-
-            if (includeItemTypes.Length != 0)
-            {
-                dto.ChildCount = itemCounts.ItemCount;
-                dto.ProgramCount = itemCounts.ProgramCount;
-                dto.SeriesCount = itemCounts.SeriesCount;
-                dto.EpisodeCount = itemCounts.EpisodeCount;
-                dto.MovieCount = itemCounts.MovieCount;
-                dto.TrailerCount = itemCounts.TrailerCount;
-                dto.AlbumCount = itemCounts.AlbumCount;
-                dto.SongCount = itemCounts.SongCount;
-                dto.ArtistCount = itemCounts.ArtistCount;
-            }
-
-            return dto;
-        });
-
-        return new QueryResult<BaseItemDto>(
-            query.StartIndex,
-            result.TotalRecordCount,
-            dtos.ToArray());
+        return RequestHelpers.CreateQueryResult(result, dtoOptions, _dtoService, user);
     }
 
     /// <summary>
@@ -462,14 +365,15 @@ public class ArtistsController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the artist.</returns>
     [HttpGet("{name}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Obsolete("Use GetPerson")]
     public ActionResult<BaseItemDto> GetArtistByName([FromRoute, Required] string name, [FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var dtoOptions = new DtoOptions().AddClientFields(User);
+        var dtoOptions = new DtoOptions();
 
         var item = _libraryManager.GetArtist(name, dtoOptions);
 
-        if (!userId.Value.Equals(default))
+        if (!userId.IsNullOrEmpty())
         {
             var user = _userManager.GetUserById(userId.Value);
 

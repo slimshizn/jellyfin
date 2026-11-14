@@ -1,14 +1,17 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.Linq;
 using System.Threading.Tasks;
-using Jellyfin.Api.Constants;
+using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Helpers;
+using Jellyfin.Api.ModelBinders;
 using Jellyfin.Data.Dtos;
-using Jellyfin.Data.Entities.Security;
 using Jellyfin.Data.Queries;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Session;
-using MediaBrowser.Model.Devices;
+using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -20,6 +23,7 @@ namespace Jellyfin.Api.Controllers;
 /// Devices Controller.
 /// </summary>
 [Authorize(Policy = Policies.RequiresElevation)]
+[Tags("Device")]
 public class DevicesController : BaseJellyfinApiController
 {
     private readonly IDeviceManager _deviceManager;
@@ -41,16 +45,15 @@ public class DevicesController : BaseJellyfinApiController
     /// <summary>
     /// Get Devices.
     /// </summary>
-    /// <param name="supportsSync">Gets or sets a value indicating whether [supports synchronize].</param>
     /// <param name="userId">Gets or sets the user identifier.</param>
     /// <response code="200">Devices retrieved.</response>
     /// <returns>An <see cref="OkResult"/> containing the list of devices.</returns>
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<QueryResult<DeviceInfo>>> GetDevices([FromQuery] bool? supportsSync, [FromQuery] Guid? userId)
+    public ActionResult<QueryResult<DeviceInfoDto>> GetDevices([FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        return await _deviceManager.GetDevicesForUser(userId, supportsSync).ConfigureAwait(false);
+        return _deviceManager.GetDevicesForUser(userId);
     }
 
     /// <summary>
@@ -63,9 +66,9 @@ public class DevicesController : BaseJellyfinApiController
     [HttpGet("Info")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<DeviceInfo>> GetDeviceInfo([FromQuery, Required] string id)
+    public ActionResult<DeviceInfoDto> GetDeviceInfo([FromQuery, Required] string id)
     {
-        var deviceInfo = await _deviceManager.GetDevice(id).ConfigureAwait(false);
+        var deviceInfo = _deviceManager.GetDevice(id);
         if (deviceInfo is null)
         {
             return NotFound();
@@ -84,9 +87,9 @@ public class DevicesController : BaseJellyfinApiController
     [HttpGet("Options")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<DeviceOptions>> GetDeviceOptions([FromQuery, Required] string id)
+    public ActionResult<DeviceOptionsDto> GetDeviceOptions([FromQuery, Required] string id)
     {
-        var deviceInfo = await _deviceManager.GetDeviceOptions(id).ConfigureAwait(false);
+        var deviceInfo = _deviceManager.GetDeviceOptions(id);
         if (deviceInfo is null)
         {
             return NotFound();
@@ -113,28 +116,31 @@ public class DevicesController : BaseJellyfinApiController
     }
 
     /// <summary>
-    /// Deletes a device.
+    /// Deletes devices.
     /// </summary>
-    /// <param name="id">Device Id.</param>
+    /// <param name="id">Device Ids.</param>
     /// <response code="204">Device deleted.</response>
-    /// <response code="404">Device not found.</response>
-    /// <returns>A <see cref="NoContentResult"/> on success, or a <see cref="NotFoundResult"/> if the device could not be found.</returns>
+    /// <response code="400">A requested device is invalid.</response>
+    /// <returns>A <see cref="NoContentResult"/> on success, or a <see cref="BadRequestResult"/> if a requested device is invalid.</returns>
     [HttpDelete]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult> DeleteDevice([FromQuery, Required] string id)
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult> DeleteDevice([FromQuery] string[] id)
     {
-        var existingDevice = await _deviceManager.GetDevice(id).ConfigureAwait(false);
-        if (existingDevice is null)
+        var devices = id.Select(_deviceManager.GetDevice).ToArray();
+        if (devices.Any(f => f is null))
         {
-            return NotFound();
+            return BadRequest();
         }
 
-        var sessions = await _deviceManager.GetDevices(new DeviceQuery { DeviceId = id }).ConfigureAwait(false);
-
-        foreach (var session in sessions.Items)
+        foreach (var device in devices)
         {
-            await _sessionManager.Logout(session).ConfigureAwait(false);
+            var sessions = _deviceManager.GetDevices(new DeviceQuery { DeviceId = device!.Id });
+
+            foreach (var session in sessions.Items)
+            {
+                await _sessionManager.Logout(session).ConfigureAwait(false);
+            }
         }
 
         return NoContent();

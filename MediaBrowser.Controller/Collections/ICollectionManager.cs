@@ -3,7 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 
@@ -56,6 +56,14 @@ namespace MediaBrowser.Controller.Collections
         /// <param name="user">The user.</param>
         /// <returns>IEnumerable{BaseItem}.</returns>
         IEnumerable<BaseItem> CollapseItemsWithinBoxSets(IEnumerable<BaseItem> items, User user);
+
+        /// <summary>
+        /// Gets the collections accessible to the supplied user that contain the provided item.
+        /// </summary>
+        /// <param name="user">The user.</param>
+        /// <param name="itemId">The item identifier.</param>
+        /// <returns>The collections containing the item.</returns>
+        IEnumerable<BoxSet> GetCollectionsContainingItem(User user, Guid itemId);
 
         /// <summary>
         /// Gets the folder where collections are stored.

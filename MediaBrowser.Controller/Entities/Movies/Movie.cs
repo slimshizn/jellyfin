@@ -4,13 +4,15 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Providers;
+using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities.Movies
 {
@@ -28,9 +30,7 @@ namespace MediaBrowser.Controller.Entities.Movies
 
         /// <inheritdoc />
         [JsonIgnore]
-        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras()
-            .Where(extra => extra.ExtraType == Model.Entities.ExtraType.Trailer)
-            .ToArray();
+        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras([Model.Entities.ExtraType.Trailer]).ToArray();
 
         /// <summary>
         /// Gets or sets the name of the TMDb collection.
@@ -44,9 +44,6 @@ namespace MediaBrowser.Controller.Entities.Movies
             get => TmdbCollectionName;
             set => TmdbCollectionName = value;
         }
-
-        [JsonIgnore]
-        public override bool StopRefreshIfLocalMetadataFound => false;
 
         public override double GetDefaultPrimaryImageAspectRatio()
         {
@@ -93,7 +90,7 @@ namespace MediaBrowser.Controller.Entities.Movies
         {
             var hasChanges = base.BeforeMetadataRefresh(replaceAllMetadata);
 
-            if (!ProductionYear.HasValue)
+            if (ProductionYear is null)
             {
                 var info = LibraryManager.ParseName(Name);
 
@@ -123,24 +120,6 @@ namespace MediaBrowser.Controller.Entities.Movies
             }
 
             return hasChanges;
-        }
-
-        /// <inheritdoc />
-        public override List<ExternalUrl> GetRelatedUrls()
-        {
-            var list = base.GetRelatedUrls();
-
-            var imdbId = this.GetProviderId(MetadataProvider.Imdb);
-            if (!string.IsNullOrEmpty(imdbId))
-            {
-                list.Add(new ExternalUrl
-                {
-                    Name = "Trakt",
-                    Url = string.Format(CultureInfo.InvariantCulture, "https://trakt.tv/movies/{0}", imdbId)
-                });
-            }
-
-            return list;
         }
     }
 }

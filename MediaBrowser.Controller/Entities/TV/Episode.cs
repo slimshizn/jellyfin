@@ -7,11 +7,14 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Serialization;
+using System.Threading;
 using Jellyfin.Data.Enums;
+using Jellyfin.Extensions;
+using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Providers;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities.TV
@@ -21,11 +24,11 @@ namespace MediaBrowser.Controller.Entities.TV
     /// </summary>
     public class Episode : Video, IHasTrailers, IHasLookupInfo<EpisodeInfo>, IHasSeries
     {
+        public static IMediaEncoder MediaEncoder { get; set; }
+
         /// <inheritdoc />
         [JsonIgnore]
-        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras()
-            .Where(extra => extra.ExtraType == Model.Entities.ExtraType.Trailer)
-            .ToArray();
+        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras([Model.Entities.ExtraType.Trailer]).ToArray();
 
         /// <summary>
         /// Gets or sets the season in which it aired.
@@ -44,7 +47,7 @@ namespace MediaBrowser.Controller.Entities.TV
         public int? IndexNumberEnd { get; set; }
 
         [JsonIgnore]
-        protected override bool SupportsOwnedItems => IsStacked || MediaSourceCount > 1;
+        protected override bool SupportsOwnedItems => IsStacked || LocalAlternateVersions.Length > 0 || MediaSourceCount > 1;
 
         [JsonIgnore]
         public override bool SupportsInheritedParentImages => true;
@@ -74,12 +77,12 @@ namespace MediaBrowser.Controller.Entities.TV
             get
             {
                 var seriesId = SeriesId;
-                if (seriesId.Equals(default))
+                if (seriesId.IsEmpty())
                 {
                     seriesId = FindSeriesId();
                 }
 
-                return seriesId.Equals(default) ? null : (LibraryManager.GetItemById(seriesId) as Series);
+                return seriesId.IsEmpty() ? null : (LibraryManager.GetItemById(seriesId) as Series);
             }
         }
 
@@ -89,12 +92,12 @@ namespace MediaBrowser.Controller.Entities.TV
             get
             {
                 var seasonId = SeasonId;
-                if (seasonId.Equals(default))
+                if (seasonId.IsEmpty())
                 {
                     seasonId = FindSeasonId();
                 }
 
-                return seasonId.Equals(default) ? null : (LibraryManager.GetItemById(seasonId) as Season);
+                return seasonId.IsEmpty() ? null : (LibraryManager.GetItemById(seasonId) as Season);
             }
         }
 
@@ -150,6 +153,12 @@ namespace MediaBrowser.Controller.Entities.TV
             return 16.0 / 9;
         }
 
+        /// <inheritdoc />
+        public override string GetInheritedOriginalLanguage()
+        {
+            return OriginalLanguage ?? Series?.GetInheritedOriginalLanguage();
+        }
+
         public override List<string> GetUserDataKeys()
         {
             var list = base.GetUserDataKeys();
@@ -179,10 +188,7 @@ namespace MediaBrowser.Controller.Entities.TV
         }
 
         public string FindSeriesPresentationUniqueKey()
-        {
-            var series = Series;
-            return series is null ? null : series.PresentationUniqueKey;
-        }
+            => Series?.PresentationUniqueKey;
 
         public string FindSeasonName()
         {
@@ -271,7 +277,7 @@ namespace MediaBrowser.Controller.Entities.TV
 
             var seasonId = SeasonId;
 
-            if (!seasonId.Equals(default) && !list.Contains(seasonId))
+            if (!seasonId.IsEmpty() && !list.Contains(seasonId))
             {
                 list.Add(seasonId);
             }
@@ -327,6 +333,39 @@ namespace MediaBrowser.Controller.Entities.TV
             {
                 if (SourceType == SourceType.Library || SourceType == SourceType.LiveTV)
                 {
+                    var libraryOptions = LibraryManager.GetLibraryOptions(this);
+                    if (libraryOptions.EnableEmbeddedEpisodeInfos && string.Equals(Container, "mp4", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            var mediaInfo = MediaEncoder.GetMediaInfo(
+                                new MediaInfoRequest
+                                {
+                                    MediaSource = GetMediaSources(false)[0],
+                                    MediaType = DlnaProfileType.Video
+                                },
+                                CancellationToken.None).GetAwaiter().GetResult();
+                            if (mediaInfo.ParentIndexNumber > 0)
+                            {
+                                ParentIndexNumber = mediaInfo.ParentIndexNumber;
+                            }
+
+                            if (mediaInfo.IndexNumber > 0)
+                            {
+                                IndexNumber = mediaInfo.IndexNumber;
+                            }
+
+                            if (!string.IsNullOrEmpty(mediaInfo.ShowName))
+                            {
+                                SeriesName = mediaInfo.ShowName;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError(ex, "Error reading the episode information with ffprobe. Episode: {EpisodeInfo}", Path);
+                        }
+                    }
+
                     try
                     {
                         if (LibraryManager.FillMissingEpisodeNumbersFromPath(this, replaceAllMetadata))
@@ -342,23 +381,6 @@ namespace MediaBrowser.Controller.Entities.TV
             }
 
             return hasChanges;
-        }
-
-        public override List<ExternalUrl> GetRelatedUrls()
-        {
-            var list = base.GetRelatedUrls();
-
-            var imdbId = this.GetProviderId(MetadataProvider.Imdb);
-            if (!string.IsNullOrEmpty(imdbId))
-            {
-                list.Add(new ExternalUrl
-                {
-                    Name = "Trakt",
-                    Url = string.Format(CultureInfo.InvariantCulture, "https://trakt.tv/episodes/{0}", imdbId)
-                });
-            }
-
-            return list;
         }
     }
 }

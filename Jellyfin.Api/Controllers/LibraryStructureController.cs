@@ -6,14 +6,21 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Api.Constants;
+using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Api.Models.LibraryStructureDto;
-using MediaBrowser.Common.Progress;
+using Jellyfin.Data;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
@@ -32,6 +39,8 @@ public class LibraryStructureController : BaseJellyfinApiController
     private readonly IServerApplicationPaths _appPaths;
     private readonly ILibraryManager _libraryManager;
     private readonly ILibraryMonitor _libraryMonitor;
+    private readonly IDirectoryService _directoryService;
+    private readonly IUserManager _userManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LibraryStructureController"/> class.
@@ -39,14 +48,20 @@ public class LibraryStructureController : BaseJellyfinApiController
     /// <param name="serverConfigurationManager">Instance of <see cref="IServerConfigurationManager"/> interface.</param>
     /// <param name="libraryManager">Instance of <see cref="ILibraryManager"/> interface.</param>
     /// <param name="libraryMonitor">Instance of <see cref="ILibraryMonitor"/> interface.</param>
+    /// <param name="directoryService">Instance of <see cref="IDirectoryService"/> interface.</param>
+    /// <param name="userManager">Instance of <see cref="IUserManager"/> interface.</param>
     public LibraryStructureController(
         IServerConfigurationManager serverConfigurationManager,
         ILibraryManager libraryManager,
-        ILibraryMonitor libraryMonitor)
+        ILibraryMonitor libraryMonitor,
+        IDirectoryService directoryService,
+        IUserManager userManager)
     {
         _appPaths = serverConfigurationManager.ApplicationPaths;
         _libraryManager = libraryManager;
         _libraryMonitor = libraryMonitor;
+        _directoryService = directoryService;
+        _userManager = userManager;
     }
 
     /// <summary>
@@ -74,9 +89,11 @@ public class LibraryStructureController : BaseJellyfinApiController
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<ActionResult> AddVirtualFolder(
-        [FromQuery] string? name,
+        [FromQuery]
+        [RegularExpression(@"^(?:\S(?:.*\S)?)$", ErrorMessage = "Library name cannot be empty or have leading/trailing spaces.")]
+        string name,
         [FromQuery] CollectionTypeOptions? collectionType,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] paths,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] paths,
         [FromBody] AddVirtualFolderDto? libraryOptionsDto,
         [FromQuery] bool refreshLibrary = false)
     {
@@ -84,7 +101,7 @@ public class LibraryStructureController : BaseJellyfinApiController
 
         if (paths is not null && paths.Length > 0)
         {
-            libraryOptions.PathInfos = paths.Select(i => new MediaPathInfo(i)).ToArray();
+            libraryOptions.PathInfos = Array.ConvertAll(paths, i => new MediaPathInfo(i));
         }
 
         await _libraryManager.AddVirtualFolder(name, collectionType, libraryOptions, refreshLibrary).ConfigureAwait(false);
@@ -98,14 +115,17 @@ public class LibraryStructureController : BaseJellyfinApiController
     /// <param name="name">The name of the folder.</param>
     /// <param name="refreshLibrary">Whether to refresh the library.</param>
     /// <response code="204">Folder removed.</response>
+    /// <response code="404">Folder not found.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpDelete]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<ActionResult> RemoveVirtualFolder(
-        [FromQuery] string? name,
+        [FromQuery] string name,
         [FromQuery] bool refreshLibrary = false)
     {
+        // TODO: refactor! this relies on an FileNotFound exception to return NotFound when attempting to remove a library that does not exist.
         await _libraryManager.RemoveVirtualFolder(name, refreshLibrary).ConfigureAwait(false);
+
         return NoContent();
     }
 
@@ -116,15 +136,17 @@ public class LibraryStructureController : BaseJellyfinApiController
     /// <param name="newName">The new name.</param>
     /// <param name="refreshLibrary">Whether to refresh the library.</param>
     /// <response code="204">Folder renamed.</response>
+    /// <response code="400">The new name is not a valid library name.</response>
     /// <response code="404">Library doesn't exist.</response>
     /// <response code="409">Library already exists.</response>
-    /// <returns>A <see cref="NoContentResult"/> on success, a <see cref="NotFoundResult"/> if the library doesn't exist, a <see cref="ConflictResult"/> if the new name is already taken.</returns>
+    /// <returns>A <see cref="NoContentResult"/> on success, a <see cref="BadRequestResult"/> if the new name is invalid, a <see cref="NotFoundResult"/> if the library doesn't exist, a <see cref="ConflictResult"/> if the new name is already taken.</returns>
     /// <exception cref="ArgumentNullException">The new name may not be null.</exception>
     [HttpPost("Name")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public ActionResult RenameVirtualFolder(
+    public async Task<ActionResult> RenameVirtualFolder(
         [FromQuery] string? name,
         [FromQuery] string? newName,
         [FromQuery] bool refreshLibrary = false)
@@ -141,10 +163,15 @@ public class LibraryStructureController : BaseJellyfinApiController
 
         var rootFolderPath = _appPaths.DefaultUserViewsPath;
 
-        var currentPath = Path.Combine(rootFolderPath, name);
-        var newPath = Path.Combine(rootFolderPath, newName);
+        // Both names are caller supplied, so they have to be confined to the libraries root.
+        var newPath = FileSystemHelper.GetChildPath(rootFolderPath, newName);
+        if (newPath is null)
+        {
+            return BadRequest("The new name is not a valid library name.");
+        }
 
-        if (!Directory.Exists(currentPath))
+        var currentPath = FileSystemHelper.GetChildPath(rootFolderPath, name);
+        if (currentPath is null || !Directory.Exists(currentPath))
         {
             return NotFound("The media collection does not exist.");
         }
@@ -153,6 +180,12 @@ public class LibraryStructureController : BaseJellyfinApiController
         {
             return Conflict($"The media library already exists at {newPath}.");
         }
+
+        var oldLibrary = FindLibrary(currentPath);
+        // Use the stored ID when possible. The case sensitivity setting may have changed since the library was created.
+        var oldLibraryId = oldLibrary?.Id ?? _libraryManager.GetNewItemId(currentPath, typeof(CollectionFolder));
+        var oldLibraryName = oldLibrary?.Name ?? Path.GetFileName(currentPath);
+        var newLibraryId = _libraryManager.GetNewItemId(newPath, typeof(CollectionFolder));
 
         _libraryMonitor.Stop();
 
@@ -164,34 +197,160 @@ public class LibraryStructureController : BaseJellyfinApiController
                 var tempPath = Path.Combine(
                     rootFolderPath,
                     Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
-                Directory.Move(currentPath, tempPath);
+                _directoryService.Move(currentPath, tempPath);
                 currentPath = tempPath;
             }
 
-            Directory.Move(currentPath, newPath);
+            _directoryService.Move(currentPath, newPath);
+
+            await ReplaceLibraryIdInUserPreferencesAsync(
+                oldLibraryId,
+                newLibraryId,
+                oldLibraryName,
+                Path.GetFileName(newPath),
+                oldLibrary?.CollectionType).ConfigureAwait(false);
         }
         finally
         {
             CollectionFolder.OnCollectionFolderChange();
 
-            Task.Run(async () =>
-            {
-                // No need to start if scanning the library because it will handle it
-                if (refreshLibrary)
-                {
-                    await _libraryManager.ValidateMediaLibrary(new SimpleProgress<double>(), CancellationToken.None).ConfigureAwait(false);
-                }
-                else
-                {
-                    // Need to add a delay here or directory watchers may still pick up the changes
-                    // Have to block here to allow exceptions to bubble
-                    await Task.Delay(1000).ConfigureAwait(false);
-                    _libraryMonitor.Start();
-                }
-            });
+            _ = Task.Run(() => RefreshAfterRenameAsync(newPath, refreshLibrary));
         }
 
         return NoContent();
+    }
+
+    private async Task RefreshAfterRenameAsync(string newPath, bool refreshLibrary)
+    {
+        // No need to start if scanning the library because it will handle it
+        if (refreshLibrary)
+        {
+            await _libraryManager.ValidateTopLibraryFolders(CancellationToken.None, true).ConfigureAwait(false);
+            var newLib = _libraryManager.GetUserRootFolder().Children.FirstOrDefault(f => f.Path.Equals(newPath, StringComparison.OrdinalIgnoreCase));
+            if (newLib is CollectionFolder folder)
+            {
+                _libraryManager.ClearIgnoreRuleCache();
+                foreach (var child in folder.GetPhysicalFolders())
+                {
+                    await child.RefreshMetadata(CancellationToken.None).ConfigureAwait(false);
+                    await child.ValidateChildren(new Progress<double>(), CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                _libraryManager.ClearIgnoreRuleCache();
+                // We don't know if this one can be validated individually, trigger a new validation
+                _libraryManager.QueueLibraryScan();
+            }
+
+            _libraryManager.ClearIgnoreRuleCache();
+        }
+        else
+        {
+            // Need to add a delay here or directory watchers may still pick up the changes
+            // Have to block here to allow exceptions to bubble
+            await Task.Delay(1000).ConfigureAwait(false);
+            _libraryMonitor.Start();
+        }
+    }
+
+    private CollectionFolder? FindLibrary(string path)
+        => _libraryManager.GetUserRootFolder().Children
+            .OfType<CollectionFolder>()
+            .FirstOrDefault(f => string.Equals(f.Path, path, StringComparison.OrdinalIgnoreCase));
+
+    private async Task ReplaceLibraryIdInUserPreferencesAsync(
+        Guid oldId,
+        Guid newId,
+        string oldName,
+        string newName,
+        CollectionType? viewType)
+    {
+        var shadowView = (
+            Old: _libraryManager.GetShadowViewId(oldName, oldId, viewType),
+            New: _libraryManager.GetShadowViewId(newName, newId, viewType));
+
+        if (oldId.Equals(newId) && shadowView.Old.Equals(shadowView.New))
+        {
+            return;
+        }
+
+        PreferenceKind[] libraryPreferences =
+        [
+            PreferenceKind.EnabledFolders,
+            PreferenceKind.BlockedMediaFolders,
+            PreferenceKind.EnableContentDeletionFromFolders,
+            PreferenceKind.LatestItemExcludes,
+            PreferenceKind.MyMediaExcludes,
+            PreferenceKind.GroupedFolders,
+            PreferenceKind.OrderedViews
+        ];
+
+        // These lists hold what the "My Media" row shows, which includes the views built from a library.
+        PreferenceKind[] viewPreferences = [PreferenceKind.MyMediaExcludes, PreferenceKind.OrderedViews];
+
+        foreach (var user in _userManager.GetUsers())
+        {
+            var libraryMap = new Dictionary<Guid, Guid> { [oldId] = newId };
+            var viewMap = new Dictionary<Guid, Guid>(libraryMap)
+            {
+                [shadowView.Old] = shadowView.New,
+                [_libraryManager.GetNamedViewId(user, oldId, viewType)] = _libraryManager.GetNamedViewId(user, newId, viewType)
+            };
+
+            var changed = false;
+
+            foreach (var kind in libraryPreferences)
+            {
+                changed |= ReplaceIds(user, kind, viewPreferences.Contains(kind) ? viewMap : libraryMap);
+            }
+
+            if (changed)
+            {
+                await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static bool ReplaceIds(User user, PreferenceKind kind, Dictionary<Guid, Guid> map)
+    {
+        var values = user.GetPreference(kind);
+        var rewritten = new List<string>(values.Length);
+        var seen = new HashSet<Guid>();
+        var touched = false;
+
+        foreach (var value in values)
+        {
+            // Clients write these in both the dashed and the plain form, so compare them parsed.
+            if (!Guid.TryParse(value, out var parsed))
+            {
+                rewritten.Add(value);
+                continue;
+            }
+
+            var isReplaced = map.TryGetValue(parsed, out var replacement) && !replacement.Equals(parsed);
+            if (isReplaced)
+            {
+                parsed = replacement;
+                touched = true;
+            }
+
+            if (!seen.Add(parsed))
+            {
+                touched = true;
+                continue;
+            }
+
+            var format = value.Contains('-', StringComparison.Ordinal) ? "D" : "N";
+            rewritten.Add(isReplaced ? parsed.ToString(format, CultureInfo.InvariantCulture) : value);
+        }
+
+        if (touched)
+        {
+            user.SetPreference(kind, rewritten.ToArray());
+        }
+
+        return touched;
     }
 
     /// <summary>
@@ -223,7 +382,7 @@ public class LibraryStructureController : BaseJellyfinApiController
                 // No need to start if scanning the library because it will handle it
                 if (refreshLibrary)
                 {
-                    await _libraryManager.ValidateMediaLibrary(new SimpleProgress<double>(), CancellationToken.None).ConfigureAwait(false);
+                    _libraryManager.QueueLibraryScan();
                 }
                 else
                 {
@@ -266,18 +425,16 @@ public class LibraryStructureController : BaseJellyfinApiController
     /// <param name="refreshLibrary">Whether to refresh the library.</param>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     /// <response code="204">Media path removed.</response>
-    /// <exception cref="ArgumentNullException">The name of the library may not be empty.</exception>
+    /// <exception cref="ArgumentException">The name of the library and path may not be empty.</exception>
     [HttpDelete("Paths")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public ActionResult RemoveMediaPath(
-        [FromQuery] string? name,
-        [FromQuery] string? path,
+        [FromQuery] string name,
+        [FromQuery] string path,
         [FromQuery] bool refreshLibrary = false)
     {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            throw new ArgumentNullException(nameof(name));
-        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
         _libraryMonitor.Stop();
 
@@ -292,7 +449,7 @@ public class LibraryStructureController : BaseJellyfinApiController
                 // No need to start if scanning the library because it will handle it
                 if (refreshLibrary)
                 {
-                    await _libraryManager.ValidateMediaLibrary(new SimpleProgress<double>(), CancellationToken.None).ConfigureAwait(false);
+                    _libraryManager.QueueLibraryScan();
                 }
                 else
                 {
@@ -312,15 +469,32 @@ public class LibraryStructureController : BaseJellyfinApiController
     /// </summary>
     /// <param name="request">The library name and options.</param>
     /// <response code="204">Library updated.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpPost("LibraryOptions")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult UpdateLibraryOptions(
         [FromBody] UpdateLibraryOptionsDto request)
     {
-        var collectionFolder = (CollectionFolder)_libraryManager.GetItemById(request.Id);
+        var item = _libraryManager.GetItemById<CollectionFolder>(request.Id);
+        if (item is null)
+        {
+            return NotFound();
+        }
 
-        collectionFolder.UpdateLibraryOptions(request.LibraryOptions);
+        LibraryOptions options = item.GetLibraryOptions();
+        foreach (var mediaPath in request.LibraryOptions!.PathInfos)
+        {
+            if (options.PathInfos.Any(i => i.Path == mediaPath.Path))
+            {
+                continue;
+            }
+
+            _libraryManager.CreateShortcut(item.Path, mediaPath);
+        }
+
+        item.UpdateLibraryOptions(request.LibraryOptions);
         return NoContent();
     }
 }

@@ -1,4 +1,4 @@
-﻿using System.Net.Mime;
+using System.Net.Mime;
 using System.Threading.Tasks;
 using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Extensions;
@@ -15,6 +15,7 @@ namespace Jellyfin.Api.Controllers;
 /// Client log controller.
 /// </summary>
 [Authorize]
+[Tags("System")]
 public class ClientLogController : BaseJellyfinApiController
 {
     private const int MaxDocumentSize = 1_000_000;

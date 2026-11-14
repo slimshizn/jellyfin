@@ -1,7 +1,3 @@
-#pragma warning disable CS1591
-
-using System;
-
 namespace MediaBrowser.Model.Querying
 {
     /// <summary>
@@ -34,6 +30,14 @@ namespace MediaBrowser.Model.Querying
         /// </summary>
         Chapters,
 
+        /// <summary>
+        /// The trickplay manifest.
+        /// </summary>
+        Trickplay,
+
+        /// <summary>
+        /// The child count.
+        /// </summary>
         ChildCount,
 
         /// <summary>
@@ -77,11 +81,6 @@ namespace MediaBrowser.Model.Querying
         Genres,
 
         /// <summary>
-        /// The home page URL.
-        /// </summary>
-        HomePageUrl,
-
-        /// <summary>
         /// The item counts.
         /// </summary>
         ItemCounts,
@@ -96,6 +95,9 @@ namespace MediaBrowser.Model.Querying
         /// </summary>
         MediaSources,
 
+        /// <summary>
+        /// The original title.
+        /// </summary>
         OriginalTitle,
 
         /// <summary>
@@ -118,6 +120,9 @@ namespace MediaBrowser.Model.Querying
         /// </summary>
         People,
 
+        /// <summary>
+        /// Value indicating whether playback access is granted.
+        /// </summary>
         PlayAccess,
 
         /// <summary>
@@ -135,20 +140,15 @@ namespace MediaBrowser.Model.Querying
         /// </summary>
         PrimaryImageAspectRatio,
 
+        /// <summary>
+        /// The recursive item count.
+        /// </summary>
         RecursiveItemCount,
 
         /// <summary>
         /// The settings.
         /// </summary>
         Settings,
-
-        /// <summary>
-        /// The screenshot image tags.
-        /// </summary>
-        [Obsolete("Screenshot image type is no longer used.")]
-        ScreenshotImageTags,
-
-        SeriesPrimaryImage,
 
         /// <summary>
         /// The series studio.
@@ -169,13 +169,6 @@ namespace MediaBrowser.Model.Querying
         /// The studios of the item.
         /// </summary>
         Studios,
-
-        BasicSyncInfo,
-
-        /// <summary>
-        /// The synchronize information.
-        /// </summary>
-        SyncInfo,
 
         /// <summary>
         /// The taglines of the item.
@@ -203,26 +196,58 @@ namespace MediaBrowser.Model.Querying
         SeasonUserData,
 
         /// <summary>
-        /// The service name.
+        /// The last time metadata was refreshed.
         /// </summary>
-        ServiceName,
-        ThemeSongIds,
-        ThemeVideoIds,
-        ExternalEtag,
-        PresentationUniqueKey,
-        InheritedParentalRatingValue,
-        ExternalSeriesId,
-        SeriesPresentationUniqueKey,
         DateLastRefreshed,
+
+        /// <summary>
+        /// The last time metadata was saved.
+        /// </summary>
         DateLastSaved,
+
+        /// <summary>
+        /// The refresh state.
+        /// </summary>
         RefreshState,
+
+        /// <summary>
+        /// The channel image.
+        /// </summary>
         ChannelImage,
+
+        /// <summary>
+        /// Value indicating whether media source display is enabled.
+        /// </summary>
         EnableMediaSourceDisplay,
+
+        /// <summary>
+        /// The width.
+        /// </summary>
         Width,
+
+        /// <summary>
+        /// The height.
+        /// </summary>
         Height,
+
+        /// <summary>
+        /// The external Ids.
+        /// </summary>
         ExtraIds,
+
+        /// <summary>
+        /// The local trailer count.
+        /// </summary>
         LocalTrailerCount,
+
+        /// <summary>
+        /// Value indicating whether the item is HD.
+        /// </summary>
         IsHD,
+
+        /// <summary>
+        /// The special feature count.
+        /// </summary>
         SpecialFeatureCount
     }
 }

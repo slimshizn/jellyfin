@@ -19,6 +19,11 @@ namespace Emby.Server.Implementations.SyncPlay
     public class SyncPlayManager : ISyncPlayManager, IDisposable
     {
         /// <summary>
+        /// How often, in milliseconds, the groups are checked for a spent wait deadline.
+        /// </summary>
+        private const int GroupWaitSweepInterval = 1000;
+
+        /// <summary>
         /// The logger.
         /// </summary>
         private readonly ILogger<SyncPlayManager> _logger;
@@ -67,7 +72,12 @@ namespace Emby.Server.Implementations.SyncPlay
         /// <remarks>
         /// This lock has priority on locks made on <see cref="Group"/>.
         /// </remarks>
-        private readonly object _groupsLock = new object();
+        private readonly Lock _groupsLock = new();
+
+        /// <summary>
+        /// The timer that watches the groups' wait deadlines, running only while there are groups.
+        /// </summary>
+        private readonly Timer _groupWaitTimer;
 
         private bool _disposed = false;
 
@@ -90,7 +100,14 @@ namespace Emby.Server.Implementations.SyncPlay
             _libraryManager = libraryManager;
             _logger = loggerFactory.CreateLogger<SyncPlayManager>();
             _sessionManager.SessionEnded += OnSessionEnded;
+            _groupWaitTimer = new Timer(_ => OnGroupWaitTimerTick(), null, Timeout.Infinite, Timeout.Infinite);
         }
+
+        /// <summary>
+        /// Gets the maximum time, in milliseconds, a group waits for its members to report ready.
+        /// </summary>
+        /// <value>The group-wait timeout.</value>
+        internal long GroupWaitTimeout { get; init; } = Group.DefaultGroupWaitTimeout;
 
         /// <inheritdoc />
         public void Dispose()
@@ -100,7 +117,7 @@ namespace Emby.Server.Implementations.SyncPlay
         }
 
         /// <inheritdoc />
-        public void NewGroup(SessionInfo session, NewGroupRequest request, CancellationToken cancellationToken)
+        public GroupInfoDto NewGroup(SessionInfo session, NewGroupRequest request, CancellationToken cancellationToken)
         {
             if (session is null)
             {
@@ -122,8 +139,12 @@ namespace Emby.Server.Implementations.SyncPlay
                     LeaveGroup(session, leaveGroupRequest, cancellationToken);
                 }
 
-                var group = new Group(_loggerFactory, _userManager, _sessionManager, _libraryManager);
+                var group = new Group(_loggerFactory, _userManager, _sessionManager, _libraryManager)
+                {
+                    GroupWaitTimeout = GroupWaitTimeout
+                };
                 _groups[group.GroupId] = group;
+                UpdateGroupWaitTimer();
 
                 if (!_sessionToGroupMap.TryAdd(session.Id, group))
                 {
@@ -132,6 +153,7 @@ namespace Emby.Server.Implementations.SyncPlay
 
                 UpdateSessionsCounter(session.UserId, 1);
                 group.CreateGroup(session, request, cancellationToken);
+                return group.GetInfo();
             }
         }
 
@@ -159,7 +181,7 @@ namespace Emby.Server.Implementations.SyncPlay
                 {
                     _logger.LogWarning("Session {SessionId} tried to join group {GroupId} that does not exist.", session.Id, request.GroupId);
 
-                    var error = new GroupUpdate<string>(Guid.Empty, GroupUpdateType.GroupDoesNotExist, string.Empty);
+                    var error = new SyncPlayGroupDoesNotExistUpdate(Guid.Empty, string.Empty);
                     _sessionManager.SendSyncPlayGroupUpdate(session.Id, error, CancellationToken.None);
                     return;
                 }
@@ -171,7 +193,7 @@ namespace Emby.Server.Implementations.SyncPlay
                     {
                         _logger.LogWarning("Session {SessionId} tried to join group {GroupId} but does not have access to some content of the playing queue.", session.Id, group.GroupId.ToString());
 
-                        var error = new GroupUpdate<string>(group.GroupId, GroupUpdateType.LibraryAccessDenied, string.Empty);
+                        var error = new SyncPlayLibraryAccessDeniedUpdate(group.GroupId, string.Empty);
                         _sessionManager.SendSyncPlayGroupUpdate(session.Id, error, CancellationToken.None);
                         return;
                     }
@@ -180,8 +202,8 @@ namespace Emby.Server.Implementations.SyncPlay
                     {
                         if (existingGroup.GroupId.Equals(request.GroupId))
                         {
-                            // Restore session.
-                            UpdateSessionsCounter(session.UserId, 1);
+                            // Restore session. The session is already in the group and has already
+                            // been counted, so the counter must not be incremented a second time.
                             group.SessionJoin(session, request, cancellationToken);
                             return;
                         }
@@ -241,6 +263,7 @@ namespace Emby.Server.Implementations.SyncPlay
                         {
                             _logger.LogInformation("Group {GroupId} is empty, removing it.", group.GroupId);
                             _groups.Remove(group.GroupId, out _);
+                            UpdateGroupWaitTimer();
                         }
                     }
                 }
@@ -248,7 +271,7 @@ namespace Emby.Server.Implementations.SyncPlay
                 {
                     _logger.LogWarning("Session {SessionId} does not belong to any group.", session.Id);
 
-                    var error = new GroupUpdate<string>(Guid.Empty, GroupUpdateType.NotInGroup, string.Empty);
+                    var error = new SyncPlayNotInGroupUpdate(Guid.Empty, string.Empty);
                     _sessionManager.SendSyncPlayGroupUpdate(session.Id, error, CancellationToken.None);
                 }
             }
@@ -289,6 +312,31 @@ namespace Emby.Server.Implementations.SyncPlay
         }
 
         /// <inheritdoc />
+        public GroupInfoDto GetGroup(SessionInfo session, Guid groupId)
+        {
+            ArgumentNullException.ThrowIfNull(session);
+
+            var user = _userManager.GetUserById(session.UserId);
+
+            lock (_groupsLock)
+            {
+                foreach (var (_, group) in _groups)
+                {
+                    // Locking required as group is not thread-safe.
+                    lock (group)
+                    {
+                        if (group.GroupId.Equals(groupId) && group.HasAccessToPlayQueue(user))
+                        {
+                            return group.GetInfo();
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <inheritdoc />
         public void HandleRequest(SessionInfo session, IGroupPlaybackRequest request, CancellationToken cancellationToken)
         {
             if (session is null)
@@ -306,8 +354,11 @@ namespace Emby.Server.Implementations.SyncPlay
                 // Group lock required as Group is not thread-safe.
                 lock (group)
                 {
-                    // Make sure that session still belongs to this group.
-                    if (_sessionToGroupMap.TryGetValue(session.Id, out var checkGroup) && !checkGroup.GroupId.Equals(group.GroupId))
+                    // Make sure that session still belongs to this group. The lookup can fail
+                    // outright when the session left while this request was waiting on the group
+                    // lock, which is exactly the case this re-check exists to catch.
+                    if (!_sessionToGroupMap.TryGetValue(session.Id, out var checkGroup)
+                        || !checkGroup.GroupId.Equals(group.GroupId))
                     {
                         // Drop request.
                         return;
@@ -327,7 +378,7 @@ namespace Emby.Server.Implementations.SyncPlay
             {
                 _logger.LogWarning("Session {SessionId} does not belong to any group.", session.Id);
 
-                var error = new GroupUpdate<string>(Guid.Empty, GroupUpdateType.NotInGroup, string.Empty);
+                var error = new SyncPlayNotInGroupUpdate(Guid.Empty, string.Empty);
                 _sessionManager.SendSyncPlayGroupUpdate(session.Id, error, CancellationToken.None);
             }
         }
@@ -355,7 +406,50 @@ namespace Emby.Server.Implementations.SyncPlay
             }
 
             _sessionManager.SessionEnded -= OnSessionEnded;
-            _disposed = true;
+
+            lock (_groupsLock)
+            {
+                _disposed = true;
+                _groupWaitTimer.Dispose();
+            }
+        }
+
+        private void UpdateGroupWaitTimer()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var interval = _groups.IsEmpty ? Timeout.Infinite : GroupWaitSweepInterval;
+            _groupWaitTimer.Change(interval, interval);
+        }
+
+        private void OnGroupWaitTimerTick()
+        {
+            try
+            {
+                lock (_groupsLock)
+                {
+                    if (_disposed)
+                    {
+                        return;
+                    }
+
+                    foreach (var (_, group) in _groups)
+                    {
+                        // Group lock required as Group is not thread-safe.
+                        lock (group)
+                        {
+                            group.HandleGroupWaitTimeout(CancellationToken.None);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error while recovering SyncPlay groups from a timed out wait.");
+            }
         }
 
         private void OnSessionEnded(object sender, SessionEventArgs e)
@@ -374,7 +468,7 @@ namespace Emby.Server.Implementations.SyncPlay
             // Update sessions counter.
             var newSessionsCounter = _activeUsers.AddOrUpdate(
                 userId,
-                1,
+                toAdd,
                 (_, sessionsCounter) => sessionsCounter + toAdd);
 
             // Should never happen.

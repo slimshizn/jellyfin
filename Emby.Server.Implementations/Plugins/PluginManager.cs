@@ -12,10 +12,11 @@ using System.Threading.Tasks;
 using Emby.Server.Implementations.Library;
 using Jellyfin.Extensions.Json;
 using Jellyfin.Extensions.Json.Converters;
-using MediaBrowser.Common;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Common.Plugins;
+using MediaBrowser.Controller;
+using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Plugins;
@@ -37,7 +38,7 @@ namespace Emby.Server.Implementations.Plugins
         private readonly List<AssemblyLoadContext> _assemblyLoadContexts;
         private readonly JsonSerializerOptions _jsonOptions;
         private readonly ILogger<PluginManager> _logger;
-        private readonly IApplicationHost _appHost;
+        private readonly IServerApplicationHost _appHost;
         private readonly ServerConfiguration _config;
         private readonly List<LocalPlugin> _plugins;
         private readonly Version _minimumVersion;
@@ -48,13 +49,13 @@ namespace Emby.Server.Implementations.Plugins
         /// Initializes a new instance of the <see cref="PluginManager"/> class.
         /// </summary>
         /// <param name="logger">The <see cref="ILogger{PluginManager}"/>.</param>
-        /// <param name="appHost">The <see cref="IApplicationHost"/>.</param>
+        /// <param name="appHost">The <see cref="IServerApplicationHost"/>.</param>
         /// <param name="config">The <see cref="ServerConfiguration"/>.</param>
         /// <param name="pluginsPath">The plugin path.</param>
         /// <param name="appVersion">The application version.</param>
         public PluginManager(
             ILogger<PluginManager> logger,
-            IApplicationHost appHost,
+            IServerApplicationHost appHost,
             ServerConfiguration config,
             string pluginsPath,
             Version appVersion)
@@ -118,7 +119,7 @@ namespace Emby.Server.Implementations.Plugins
             // Now load the assemblies..
             foreach (var plugin in _plugins)
             {
-                UpdatePluginSuperceedStatus(plugin);
+                UpdatePluginSupersededStatus(plugin);
 
                 if (plugin.IsEnabledAndSupported == false)
                 {
@@ -213,7 +214,7 @@ namespace Emby.Server.Implementations.Plugins
                     continue;
                 }
 
-                UpdatePluginSuperceedStatus(plugin);
+                UpdatePluginSupersededStatus(plugin);
                 if (!plugin.IsEnabledAndSupported)
                 {
                     continue;
@@ -222,7 +223,7 @@ namespace Emby.Server.Implementations.Plugins
                 try
                 {
                     var instance = (IPluginServiceRegistrator?)Activator.CreateInstance(pluginServiceRegistrator);
-                    instance?.RegisterServices(serviceCollection);
+                    instance?.RegisterServices(serviceCollection, _appHost);
                 }
 #pragma warning disable CA1031 // Do not catch general exception types
                 catch (Exception ex)
@@ -254,6 +255,14 @@ namespace Emby.Server.Implementations.Plugins
             }
 
             _plugins.Add(plugin);
+
+            // Updating a disabled plugin must not enable it again.
+            if (plugin.Manifest.Status == PluginStatus.Disabled)
+            {
+                ProcessAlternative(plugin);
+                return;
+            }
+
             EnablePlugin(plugin);
         }
 
@@ -386,21 +395,11 @@ namespace Emby.Server.Implementations.Plugins
                 var url = new Uri(packageInfo.ImageUrl);
                 imagePath = Path.Join(path, url.Segments[^1]);
 
-                await using var fileStream = AsyncFile.OpenWrite(imagePath);
-
-                try
+                // The catalog is refreshed on every dashboard visit and rewrites the manifest of
+                // every installed plugin, so only fetch an image that is actually missing.
+                if (!ImageExists(imagePath))
                 {
-                    await using var downloadStream = await HttpClientFactory
-                        .CreateClient(NamedClient.Default)
-                        .GetStreamAsync(url)
-                        .ConfigureAwait(false);
-
-                    await downloadStream.CopyToAsync(fileStream).ConfigureAwait(false);
-                }
-                catch (HttpRequestException ex)
-                {
-                    _logger.LogError(ex, "Failed to download image to path {Path} on disk.", imagePath);
-                    imagePath = string.Empty;
+                    imagePath = await DownloadImage(url, imagePath).ConfigureAwait(false);
                 }
             }
 
@@ -414,14 +413,14 @@ namespace Emby.Server.Implementations.Plugins
                 Overview = packageInfo.Overview,
                 Owner = packageInfo.Owner,
                 TargetAbi = versionInfo.TargetAbi ?? string.Empty,
-                Timestamp = string.IsNullOrEmpty(versionInfo.Timestamp) ? DateTime.MinValue : DateTime.Parse(versionInfo.Timestamp, CultureInfo.InvariantCulture),
+                Timestamp = string.IsNullOrEmpty(versionInfo.Timestamp) ? DateTime.MinValue : DateTime.Parse(versionInfo.Timestamp, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal),
                 Version = versionInfo.Version,
                 Status = status == PluginStatus.Disabled ? PluginStatus.Disabled : PluginStatus.Active, // Keep disabled state.
                 AutoUpdate = true,
                 ImagePath = imagePath
             };
 
-            if (!await ReconcileManifest(manifest, path))
+            if (!await ReconcileManifest(manifest, path).ConfigureAwait(false))
             {
                 // An error occurred during reconciliation and saving could be undesirable.
                 return false;
@@ -436,6 +435,67 @@ namespace Emby.Server.Implementations.Plugins
             foreach (var assemblyLoadContext in _assemblyLoadContexts)
             {
                 assemblyLoadContext.Unload();
+            }
+        }
+
+        private static bool ImageExists(string imagePath)
+        {
+            var image = new FileInfo(imagePath);
+
+            // A previous download may have been interrupted, leaving an empty file behind.
+            return image.Exists && image.Length > 0;
+        }
+
+        private async Task<string> DownloadImage(Uri url, string imagePath)
+        {
+            // Download to a temporary file and move it into place, so that neither a failed download
+            // nor a concurrent one can be observed as a partially written image.
+            var tempPath = imagePath + "." + Path.GetRandomFileName();
+
+            try
+            {
+                var fileStream = AsyncFile.Create(tempPath);
+                Stream? downloadStream = null;
+                try
+                {
+                    downloadStream = await HttpClientFactory
+                        .CreateClient(NamedClient.Default)
+                        .GetStreamAsync(url)
+                        .ConfigureAwait(false);
+
+                    await downloadStream.CopyToAsync(fileStream).ConfigureAwait(false);
+                }
+                finally
+                {
+                    await fileStream.DisposeAsync().ConfigureAwait(false);
+                    if (downloadStream is not null)
+                    {
+                        await downloadStream.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+
+                File.Move(tempPath, imagePath, true);
+
+                return imagePath;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException)
+            {
+                _logger.LogError(ex, "Failed to download image to path {Path} on disk.", imagePath);
+                TryDeleteFile(tempPath);
+
+                return string.Empty;
+            }
+        }
+
+        private void TryDeleteFile(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(ex, "Unable to delete {Path}.", path);
             }
         }
 
@@ -458,7 +518,7 @@ namespace Emby.Server.Implementations.Plugins
                 }
 
                 using var metaStream = File.OpenRead(metafile);
-                var localManifest = await JsonSerializer.DeserializeAsync<PluginManifest>(metaStream, _jsonOptions);
+                var localManifest = await JsonSerializer.DeserializeAsync<PluginManifest>(metaStream, _jsonOptions).ConfigureAwait(false);
                 localManifest ??= new PluginManifest();
 
                 if (!Equals(localManifest.Id, manifest.Id))
@@ -555,7 +615,8 @@ namespace Emby.Server.Implementations.Plugins
                             Id = instance.Id,
                             Status = PluginStatus.Active,
                             Name = instance.Name,
-                            Version = instance.Version.ToString()
+                            Version = instance.Version.ToString(),
+                            ImageResourceName = (instance as IHasEmbeddedImage)?.ImageResourceName
                         })
                     {
                         Instance = instance
@@ -615,16 +676,17 @@ namespace Emby.Server.Implementations.Plugins
             }
         }
 
-        private void UpdatePluginSuperceedStatus(LocalPlugin plugin)
+        private void UpdatePluginSupersededStatus(LocalPlugin plugin)
         {
-            if (plugin.Manifest.Status != PluginStatus.Superceded)
+            if (plugin.Manifest.Status != PluginStatus.Superseded)
             {
                 return;
             }
 
-            var predecessor = _plugins.OrderByDescending(p => p.Version)
-                .FirstOrDefault(p => p.Id.Equals(plugin.Id) && p.IsEnabledAndSupported && p.Version != plugin.Version);
-            if (predecessor is not null)
+            var successor = _plugins.FirstOrDefault(p => p.Id.Equals(plugin.Id)
+                && p.Version > plugin.Version
+                && (p.IsEnabledAndSupported || p.Manifest.Status == PluginStatus.Disabled));
+            if (successor is not null)
             {
                 return;
             }
@@ -753,6 +815,8 @@ namespace Emby.Server.Implementations.Plugins
                 var entry = versions[x];
                 if (!string.Equals(lastName, entry.Name, StringComparison.OrdinalIgnoreCase))
                 {
+                    lastName = string.Empty;
+
                     if (!TryGetPluginDlls(entry, out var allowedDlls))
                     {
                         _logger.LogError("One or more assembly paths was invalid. Marking plugin {Plugin} as \"Malfunctioned\".", entry.Name);
@@ -762,44 +826,44 @@ namespace Emby.Server.Implementations.Plugins
 
                     entry.DllFiles = allowedDlls;
 
+                    // Only clean up older versions when this version will actually be loaded.
                     if (entry.IsEnabledAndSupported)
                     {
                         lastName = entry.Name;
-                        continue;
                     }
+
+                    continue;
                 }
 
                 if (string.IsNullOrEmpty(lastName))
                 {
+                    // Unnamed plugin, so there is nothing to match older versions against.
                     continue;
                 }
 
                 var cleaned = false;
                 var path = entry.Path;
-                if (_config.RemoveOldPlugins)
+                // Attempt a cleanup of old folders.
+                try
                 {
-                    // Attempt a cleanup of old folders.
-                    try
-                    {
-                        _logger.LogDebug("Deleting {Path}", path);
-                        Directory.Delete(path, true);
-                        cleaned = true;
-                    }
+                    _logger.LogDebug("Deleting {Path}", path);
+                    Directory.Delete(path, true);
+                    cleaned = true;
+                }
 #pragma warning disable CA1031 // Do not catch general exception types
-                    catch (Exception e)
+                catch (Exception e)
 #pragma warning restore CA1031 // Do not catch general exception types
-                    {
-                        _logger.LogWarning(e, "Unable to delete {Path}", path);
-                    }
+                {
+                    _logger.LogWarning(e, "Unable to delete {Path}", path);
+                }
 
-                    if (cleaned)
-                    {
-                        versions.RemoveAt(x);
-                    }
-                    else
-                    {
-                        ChangePluginState(entry, PluginStatus.Deleted);
-                    }
+                if (cleaned)
+                {
+                    versions.RemoveAt(x);
+                }
+                else
+                {
+                    ChangePluginState(entry, PluginStatus.Deleted);
                 }
             }
 
@@ -826,7 +890,7 @@ namespace Emby.Server.Implementations.Plugins
         /// <exception cref="ArgumentNullException">If the <see cref="LocalPlugin"/> is null.</exception>
         private bool TryGetPluginDlls(LocalPlugin plugin, out IReadOnlyList<string> whitelistedDlls)
         {
-            ArgumentNullException.ThrowIfNull(nameof(plugin));
+            ArgumentNullException.ThrowIfNull(plugin);
 
             IReadOnlyList<string> pluginDlls = Directory.GetFiles(plugin.Path, "*.dll", SearchOption.AllDirectories);
 
@@ -870,7 +934,7 @@ namespace Emby.Server.Implementations.Plugins
         }
 
         /// <summary>
-        /// Changes the status of the other versions of the plugin to "Superceded".
+        /// Changes the status of the other versions of the plugin to "Superseded".
         /// </summary>
         /// <param name="plugin">The <see cref="LocalPlugin"/> that's master.</param>
         private void ProcessAlternative(LocalPlugin plugin)
@@ -884,24 +948,22 @@ namespace Emby.Server.Implementations.Plugins
 
             if (previousVersion is null)
             {
-                // This value is memory only - so that the web will show restart required.
-                plugin.Manifest.Status = PluginStatus.Restart;
-                plugin.Manifest.AutoUpdate = false;
+                // Memory only, so that the web will show restart required. The manifest must keep
+                // holding the persisted state, or a later save would write the wrong state to disk.
+                plugin.RestartRequired = true;
                 return;
             }
 
-            if (plugin.Manifest.Status == PluginStatus.Active && !ChangePluginState(previousVersion, PluginStatus.Superceded))
+            if (plugin.Manifest.Status == PluginStatus.Active && !ChangePluginState(previousVersion, PluginStatus.Superseded))
             {
                 _logger.LogError("Unable to enable version {Version} of {Name}", previousVersion.Version, previousVersion.Name);
             }
-            else if (plugin.Manifest.Status == PluginStatus.Superceded && !ChangePluginState(previousVersion, PluginStatus.Active))
+            else if (plugin.Manifest.Status == PluginStatus.Superseded && !ChangePluginState(previousVersion, PluginStatus.Active))
             {
                 _logger.LogError("Unable to supercede version {Version} of {Name}", previousVersion.Version, previousVersion.Name);
             }
 
-            // This value is memory only - so that the web will show restart required.
-            plugin.Manifest.Status = PluginStatus.Restart;
-            plugin.Manifest.AutoUpdate = false;
+            plugin.RestartRequired = true;
         }
     }
 }

@@ -16,12 +16,12 @@ public sealed class VideosControllerTests : IClassFixture<JellyfinApplicationFac
     }
 
     [Fact]
-    public async Task DeleteAlternateSources_NonExistentItemId_NotFound()
+    public async Task DeleteAlternateSources_NonexistentItemId_NotFound()
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
 
-        var response = await client.DeleteAsync($"Videos/{Guid.NewGuid()}");
+        var response = await client.DeleteAsync($"Videos/{Guid.NewGuid()}", TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 }

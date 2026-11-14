@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Sockets;
-using Microsoft.AspNetCore.HttpOverrides;
 
 namespace MediaBrowser.Model.Net;
 
@@ -48,6 +47,11 @@ public class IPData
     public int Index { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether the network supports multicast.
+    /// </summary>
+    public bool SupportsMulticast { get; set; } = false;
+
+    /// <summary>
     /// Gets or sets the interface name.
     /// </summary>
     public string Name { get; set; }
@@ -61,9 +65,9 @@ public class IPData
         {
             if (Address.Equals(IPAddress.None))
             {
-                return Subnet.Prefix.AddressFamily.Equals(IPAddress.None)
+                return Subnet.BaseAddress.AddressFamily.Equals(IPAddress.None)
                     ? AddressFamily.Unspecified
-                    : Subnet.Prefix.AddressFamily;
+                    : Subnet.BaseAddress.AddressFamily;
             }
             else
             {

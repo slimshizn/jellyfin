@@ -14,6 +14,7 @@ namespace MediaBrowser.Controller.Entities.Audio
     /// <summary>
     /// Class MusicGenre.
     /// </summary>
+    [Common.RequiresSourceSerialisation]
     public class MusicGenre : BaseItem, IItemByName
     {
         [JsonIgnore]
@@ -64,7 +65,7 @@ namespace MediaBrowser.Controller.Entities.Audio
             return true;
         }
 
-        public IList<BaseItem> GetTaggedItems(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetTaggedItems(InternalItemsQuery query)
         {
             query.GenreIds = new[] { Id };
             query.IncludeItemTypes = new[] { BaseItemKind.MusicVideo, BaseItemKind.Audio, BaseItemKind.MusicAlbum, BaseItemKind.MusicArtist };
@@ -79,10 +80,7 @@ namespace MediaBrowser.Controller.Entities.Audio
 
         public static string GetPath(string name, bool normalizeName)
         {
-            // Trim the period at the end because windows will have a hard time with that
-            var validName = normalizeName ?
-                FileSystem.GetValidFilename(name).Trim().TrimEnd('.') :
-                name;
+            var validName = normalizeName ? GetItemByNameFolderName(name) : name;
 
             return System.IO.Path.Combine(ConfigurationManager.ApplicationPaths.MusicGenrePath, validName);
         }

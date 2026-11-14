@@ -104,6 +104,13 @@ namespace Emby.Server.Implementations.Data
 
             if (DateTime.TryParseExact(dateText, _datetimeFormats, DateTimeFormatInfo.InvariantInfo, DateTimeStyles.AdjustToUniversal, out var dateTimeResult))
             {
+                // If the resulting DateTimeKind is Unspecified it is actually Utc.
+                // This is required downstream for the Json serializer.
+                if (dateTimeResult.Kind == DateTimeKind.Unspecified)
+                {
+                    dateTimeResult = DateTime.SpecifyKind(dateTimeResult, DateTimeKind.Utc);
+                }
+
                 result = dateTimeResult;
                 return true;
             }
@@ -120,8 +127,16 @@ namespace Emby.Server.Implementations.Data
                 return false;
             }
 
-            result = reader.GetGuid(index);
-            return true;
+            try
+            {
+                result = reader.GetGuid(index);
+                return true;
+            }
+            catch
+            {
+                result = Guid.Empty;
+                return false;
+            }
         }
 
         public static bool TryGetString(this SqliteDataReader reader, int index, out string result)

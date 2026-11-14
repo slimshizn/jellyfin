@@ -4,7 +4,6 @@
 
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -50,9 +49,7 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
         /// <inheritdoc />
         public async Task<IEnumerable<RemoteImageInfo>> GetImages(BaseItem item, CancellationToken cancellationToken)
         {
-            var id = item.GetProviderId(MetadataProvider.MusicBrainzReleaseGroup);
-
-            if (!string.IsNullOrWhiteSpace(id))
+            if (item.TryGetProviderId(MetadataProvider.MusicBrainzReleaseGroup, out var id))
             {
                 await AudioDbAlbumProvider.Current.EnsureInfo(id, cancellationToken).ConfigureAwait(false);
 
@@ -70,10 +67,10 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
                 }
             }
 
-            return Enumerable.Empty<RemoteImageInfo>();
+            return [];
         }
 
-        private IEnumerable<RemoteImageInfo> GetImages(AudioDbAlbumProvider.Album item)
+        private List<RemoteImageInfo> GetImages(AudioDbAlbumProvider.Album item)
         {
             var list = new List<RemoteImageInfo>();
 

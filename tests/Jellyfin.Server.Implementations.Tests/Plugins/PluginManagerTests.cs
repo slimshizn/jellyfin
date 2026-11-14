@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using AutoFixture;
 using Emby.Server.Implementations.Library;
 using Emby.Server.Implementations.Plugins;
+using Jellyfin.Extensions;
 using Jellyfin.Extensions.Json;
 using Jellyfin.Extensions.Json.Converters;
 using MediaBrowser.Common.Plugins;
@@ -85,7 +86,7 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
             var dllPath = Path.GetDirectoryName(Path.Combine(_pluginPath, dllFile))!;
 
             Directory.CreateDirectory(dllPath);
-            File.Create(Path.Combine(dllPath, filename));
+            FileHelper.CreateEmpty(Path.Combine(dllPath, filename));
             var metafilePath = Path.Combine(_pluginPath, "meta.json");
 
             File.WriteAllText(metafilePath, JsonSerializer.Serialize(manifest, _options));
@@ -119,8 +120,8 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
         [InlineData("C:\\some.dll")] // Windows root path.
         [InlineData("test.txt")] // Not a DLL
         [InlineData(".././.././../some.dll")] // Traversal with current and parent
-        [InlineData("..\\.\\..\\.\\..\\some.dll")] // Windows traversal with current and parent
-        [InlineData("\\\\network\\resource.dll")] // UNC Path
+        [InlineData(@"..\.\..\.\..\some.dll")] // Windows traversal with current and parent
+        [InlineData(@"\\network\resource.dll")] // UNC Path
         [InlineData("https://jellyfin.org/some.dll")] // URL
         [InlineData("~/some.dll")] // Tilde poses a shell expansion risk, but is a valid path character.
         public void Constructor_DiscoversUnsafePluginAssembly_Status_Malfunctioned(string unsafePath)
@@ -141,7 +142,7 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
 
             foreach (var file in files)
             {
-                File.Create(Path.Combine(_pluginPath, file));
+                FileHelper.CreateEmpty(Path.Combine(_pluginPath, file));
             }
 
             var metafilePath = Path.Combine(_pluginPath, "meta.json");
@@ -184,20 +185,20 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
                 Description = packageInfo.Description,
                 Overview = packageInfo.Overview,
                 TargetAbi = packageInfo.Versions[0].TargetAbi!,
-                Timestamp = DateTime.Parse(packageInfo.Versions[0].Timestamp!, CultureInfo.InvariantCulture),
+                Timestamp = DateTimeOffset.Parse(packageInfo.Versions[0].Timestamp!, CultureInfo.InvariantCulture).UtcDateTime,
                 Changelog = packageInfo.Versions[0].Changelog!,
                 Version = new Version(1, 0).ToString(),
                 ImagePath = string.Empty
             };
 
             var metafilePath = Path.Combine(_pluginPath, "meta.json");
-            File.WriteAllText(metafilePath, JsonSerializer.Serialize(partial, _options));
+            await File.WriteAllTextAsync(metafilePath, JsonSerializer.Serialize(partial, _options), TestContext.Current.CancellationToken);
 
             var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, _tempPath, new Version(1, 0));
 
             await pluginManager.PopulateManifest(packageInfo, new Version(1, 0), _pluginPath, PluginStatus.Active);
 
-            var resultBytes = File.ReadAllBytes(metafilePath);
+            var resultBytes = await File.ReadAllBytesAsync(metafilePath, TestContext.Current.CancellationToken);
             var result = JsonSerializer.Deserialize<PluginManifest>(resultBytes, _options);
 
             Assert.NotNull(result);
@@ -220,7 +221,7 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
                 Description = packageInfo.Description,
                 Overview = packageInfo.Overview,
                 TargetAbi = packageInfo.Versions[0].TargetAbi!,
-                Timestamp = DateTime.Parse(packageInfo.Versions[0].Timestamp!, CultureInfo.InvariantCulture),
+                Timestamp = DateTimeOffset.Parse(packageInfo.Versions[0].Timestamp!, CultureInfo.InvariantCulture).UtcDateTime,
                 Changelog = packageInfo.Versions[0].Changelog!,
                 Version = packageInfo.Versions[0].Version,
                 ImagePath = string.Empty
@@ -231,11 +232,33 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
             await pluginManager.PopulateManifest(packageInfo, new Version(1, 0), _pluginPath, PluginStatus.Active);
 
             var metafilePath = Path.Combine(_pluginPath, "meta.json");
-            var resultBytes = File.ReadAllBytes(metafilePath);
+            var resultBytes = await File.ReadAllBytesAsync(metafilePath, TestContext.Current.CancellationToken);
             var result = JsonSerializer.Deserialize<PluginManifest>(resultBytes, _options);
 
             Assert.NotNull(result);
             Assert.Equivalent(expectedManifest, result);
+        }
+
+        [Fact]
+        public async Task PopulateManifest_ExistingImage_IsNotDownloaded()
+        {
+            const string ImageContent = "not really a png";
+
+            var packageInfo = GenerateTestPackage();
+            packageInfo.ImageUrl = "https://example.org/some-plugin.png";
+
+            var imagePath = Path.Combine(_pluginPath, "some-plugin.png");
+            await File.WriteAllTextAsync(imagePath, ImageContent, TestContext.Current.CancellationToken);
+
+            // The application host is null, so attempting to download the image would throw.
+            var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, null!, new Version(1, 0));
+
+            Assert.True(await pluginManager.PopulateManifest(packageInfo, new Version(1, 0), _pluginPath, PluginStatus.Active));
+
+            var result = pluginManager.LoadManifest(_pluginPath).Manifest;
+
+            Assert.Equal(imagePath, result.ImagePath);
+            Assert.Equal(ImageContent, await File.ReadAllTextAsync(imagePath, TestContext.Current.CancellationToken));
         }
 
         [Fact]
@@ -251,13 +274,13 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
             };
 
             var metafilePath = Path.Combine(_pluginPath, "meta.json");
-            File.WriteAllText(metafilePath, JsonSerializer.Serialize(partial, _options));
+            await File.WriteAllTextAsync(metafilePath, JsonSerializer.Serialize(partial, _options), TestContext.Current.CancellationToken);
 
             var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, _tempPath, new Version(1, 0));
 
             await pluginManager.PopulateManifest(packageInfo, new Version(1, 0), _pluginPath, PluginStatus.Active);
 
-            var resultBytes = File.ReadAllBytes(metafilePath);
+            var resultBytes = await File.ReadAllBytesAsync(metafilePath, TestContext.Current.CancellationToken);
             var result = JsonSerializer.Deserialize<PluginManifest>(resultBytes, _options);
 
             Assert.NotNull(result);
@@ -277,13 +300,13 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
             };
 
             var metafilePath = Path.Combine(_pluginPath, "meta.json");
-            File.WriteAllText(metafilePath, JsonSerializer.Serialize(partial, _options));
+            await File.WriteAllTextAsync(metafilePath, JsonSerializer.Serialize(partial, _options), TestContext.Current.CancellationToken);
 
             var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, _tempPath, new Version(1, 0));
 
             await pluginManager.PopulateManifest(packageInfo, new Version(1, 0), _pluginPath, PluginStatus.Active);
 
-            var resultBytes = File.ReadAllBytes(metafilePath);
+            var resultBytes = await File.ReadAllBytesAsync(metafilePath, TestContext.Current.CancellationToken);
             var result = JsonSerializer.Deserialize<PluginManifest>(resultBytes, _options);
 
             Assert.NotNull(result);
@@ -292,7 +315,84 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
             Assert.Equal(packageInfo.Versions[0].Version, result.Version);
         }
 
-        private PackageInfo GenerateTestPackage()
+        [Fact]
+        public async Task DisablePlugin_CatalogRefresh_StaysDisabled()
+        {
+            var pluginRoot = Path.Combine(_tempPath, "plugins");
+            var pluginDir = CreateTestPlugin(pluginRoot, "Disable Me", PluginStatus.Active);
+
+            var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, pluginRoot, new Version(1, 0));
+            var plugin = Assert.Single(pluginManager.Plugins);
+
+            pluginManager.DisablePlugin(plugin);
+
+            Assert.Equal(PluginStatus.Disabled, pluginManager.LoadManifest(pluginDir).Manifest.Status);
+
+            // The web shows that a restart is required, but the persisted state must not change.
+            Assert.Equal(PluginStatus.Restart, plugin.GetPluginInfo().Status);
+            Assert.Equal(PluginStatus.Disabled, plugin.Manifest.Status);
+            Assert.True(plugin.Manifest.AutoUpdate);
+
+            // Every catalog fetch rewrites the manifests of installed plugins from the in-memory status.
+            var packageInfo = GenerateTestPackage(plugin.Id);
+            await pluginManager.PopulateManifest(packageInfo, new Version(1, 0), pluginDir, plugin.Manifest.Status);
+
+            Assert.Equal(PluginStatus.Disabled, pluginManager.LoadManifest(pluginDir).Manifest.Status);
+        }
+
+        [Fact]
+        public void Constructor_DisabledPluginSortingBeforeEnabledPlugin_IsNotDeleted()
+        {
+            var pluginRoot = Path.Combine(_tempPath, "plugins");
+            var disabledDir = CreateTestPlugin(pluginRoot, "AAA Disabled", PluginStatus.Disabled);
+            CreateTestPlugin(pluginRoot, "ZZZ Active", PluginStatus.Active);
+
+            var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, pluginRoot, new Version(1, 0));
+
+            Assert.True(Directory.Exists(disabledDir));
+            Assert.Contains(pluginManager.Plugins, p => string.Equals(p.Name, "AAA Disabled", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void LoadAssemblies_DisabledPluginWithSupersededVersion_DoesNotRevertToOldVersion()
+        {
+            var pluginRoot = Path.Combine(_tempPath, "plugins");
+            var id = Guid.NewGuid();
+            var oldDir = CreateTestPlugin(pluginRoot, "Two Versions", PluginStatus.Superseded, new Version(1, 0), id);
+            var newDir = CreateTestPlugin(pluginRoot, "Two Versions_2.0", PluginStatus.Disabled, new Version(2, 0), id, "Two Versions");
+
+            var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, pluginRoot, new Version(1, 0));
+
+            Assert.Empty(pluginManager.LoadAssemblies());
+
+            // Neither version may be touched: the old one stays superseded instead of being loaded
+            // as a stand-in for the version the user disabled.
+            Assert.Equal(PluginStatus.Superseded, pluginManager.LoadManifest(oldDir).Manifest.Status);
+            Assert.Equal(PluginStatus.Disabled, pluginManager.LoadManifest(newDir).Manifest.Status);
+        }
+
+        private string CreateTestPlugin(string root, string folderName, PluginStatus status, Version? version = null, Guid? id = null, string? name = null)
+        {
+            var dir = Path.Combine(root, folderName);
+            Directory.CreateDirectory(dir);
+            FileHelper.CreateEmpty(Path.Combine(dir, "some.dll"));
+
+            var manifest = new PluginManifest
+            {
+                Id = id ?? Guid.NewGuid(),
+                Name = name ?? folderName,
+                Status = status,
+                AutoUpdate = true,
+                TargetAbi = "1.0",
+                Version = (version ?? new Version(1, 0)).ToString()
+            };
+
+            File.WriteAllText(Path.Combine(dir, "meta.json"), JsonSerializer.Serialize(manifest, _options));
+
+            return dir;
+        }
+
+        private PackageInfo GenerateTestPackage(Guid? id = null)
         {
             var fixture = new Fixture();
             fixture.Customize<PackageInfo>(c => c.Without(x => x.Versions).Without(x => x.ImageUrl));
@@ -300,10 +400,14 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
 
             var versionInfo = fixture.Create<VersionInfo>();
             versionInfo.Version = new Version(1, 0).ToString();
-            versionInfo.Timestamp = DateTime.UtcNow.ToString(CultureInfo.InvariantCulture);
+            versionInfo.Timestamp = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 
             var packageInfo = fixture.Create<PackageInfo>();
             packageInfo.Versions = new[] { versionInfo };
+            if (id.HasValue)
+            {
+                packageInfo.Id = id.Value;
+            }
 
             return packageInfo;
         }

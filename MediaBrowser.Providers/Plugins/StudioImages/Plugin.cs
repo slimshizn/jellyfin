@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
+using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Providers.Plugins.StudioImages.Configuration;
@@ -13,12 +14,12 @@ namespace MediaBrowser.Providers.Plugins.StudioImages
     /// <summary>
     /// Artwork Plugin class.
     /// </summary>
-    public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
+    public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IHasEmbeddedImage
     {
         /// <summary>
         /// Artwork repository URL.
         /// </summary>
-        public const string DefaultServer = "https://raw.github.com/jellyfin/emby-artwork/master/studios";
+        public const string DefaultServer = "https://raw.githubusercontent.com/jellyfin/emby-artwork/master/studios";
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Plugin"/> class.
@@ -49,6 +50,9 @@ namespace MediaBrowser.Providers.Plugins.StudioImages
 
         /// <inheritdoc/>
         public override string ConfigurationFileName => "Jellyfin.Plugin.StudioImages.xml";
+
+        /// <inheritdoc/>
+        public string ImageResourceName => GetType().Namespace + ".jellyfin-plugin-studioimages.svg";
 
         /// <inheritdoc/>
         public IEnumerable<PluginPageInfo> GetPages()

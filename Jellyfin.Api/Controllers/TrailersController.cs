@@ -1,6 +1,8 @@
 using System;
+using System.Threading.Tasks;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
@@ -14,6 +16,7 @@ namespace Jellyfin.Api.Controllers;
 /// The trailers controller.
 /// </summary>
 [Authorize]
+[Tags("Trailer")]
 public class TrailersController : BaseJellyfinApiController
 {
     private readonly ItemsController _itemsController;
@@ -112,12 +115,15 @@ public class TrailersController : BaseJellyfinApiController
     /// <param name="nameLessThan">Optional filter by items whose name is equally or lesser than a given input string.</param>
     /// <param name="studioIds">Optional. If specified, results will be filtered based on studio id. This allows multiple, pipe delimited.</param>
     /// <param name="genreIds">Optional. If specified, results will be filtered based on genre id. This allows multiple, pipe delimited.</param>
+    /// <param name="audioLanguages">Optional. If specified, results will be filtered based on audio language. This allows multiple, comma delimited values.</param>
+    /// <param name="subtitleLanguages">Optional. If specified, results will be filtered based on subtitale language. This allows multiple, comma delimited values.</param>
     /// <param name="enableTotalRecordCount">Optional. Enable the total record count.</param>
     /// <param name="enableImages">Optional, include image information in output.</param>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the trailers.</returns>
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<QueryResult<BaseItemDto>> GetTrailers(
+    [Obsolete("Use GetItems with includeItemTypes=Trailer instead.")]
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetTrailers(
         [FromQuery] Guid? userId,
         [FromQuery] string? maxOfficialRating,
         [FromQuery] bool? hasThemeSong,
@@ -130,8 +136,8 @@ public class TrailersController : BaseJellyfinApiController
         [FromQuery] bool? hasParentalRating,
         [FromQuery] bool? isHd,
         [FromQuery] bool? is4K,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] LocationType[] locationTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] LocationType[] excludeLocationTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] LocationType[] locationTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] LocationType[] excludeLocationTypes,
         [FromQuery] bool? isMissing,
         [FromQuery] bool? isUnaired,
         [FromQuery] double? minCommunityRating,
@@ -149,41 +155,41 @@ public class TrailersController : BaseJellyfinApiController
         [FromQuery] bool? isNews,
         [FromQuery] bool? isKids,
         [FromQuery] bool? isSports,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeItemIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeItemIds,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] bool? recursive,
         [FromQuery] string? searchTerm,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] excludeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
         [FromQuery] bool? isFavorite,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] mediaTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] imageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] imageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
         [FromQuery] bool? isPlayed,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] genres,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] officialRatings,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] tags,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] int[] years,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] genres,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] officialRatings,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] tags,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] int[] years,
         [FromQuery] bool? enableUserData,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] string? person,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] personIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] personTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] studios,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] artists,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] artistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] albumArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] contributingArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] albums,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] albumIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] ids,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] VideoType[] videoTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] personIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] personTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] studios,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] artists,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] artistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] albumArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] contributingArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] albums,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] albumIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] VideoType[] videoTypes,
         [FromQuery] string? minOfficialRating,
         [FromQuery] bool? isLocked,
         [FromQuery] bool? isPlaceHolder,
@@ -194,18 +200,20 @@ public class TrailersController : BaseJellyfinApiController
         [FromQuery] int? maxWidth,
         [FromQuery] int? maxHeight,
         [FromQuery] bool? is3D,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SeriesStatus[] seriesStatus,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SeriesStatus[] seriesStatus,
         [FromQuery] string? nameStartsWithOrGreater,
         [FromQuery] string? nameStartsWith,
         [FromQuery] string? nameLessThan,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] studioIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] studioIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] audioLanguages,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] subtitleLanguages,
         [FromQuery] bool enableTotalRecordCount = true,
         [FromQuery] bool? enableImages = true)
     {
         var includeItemTypes = new[] { BaseItemKind.Trailer };
 
-        return _itemsController
+        return await _itemsController
             .GetItems(
                 userId,
                 maxOfficialRating,
@@ -215,6 +223,7 @@ public class TrailersController : BaseJellyfinApiController
                 hasSpecialFeature,
                 hasTrailer,
                 adjacentTo,
+                null,
                 parentIndexNumber,
                 hasParentalRating,
                 isHd,
@@ -290,7 +299,9 @@ public class TrailersController : BaseJellyfinApiController
                 nameLessThan,
                 studioIds,
                 genreIds,
+                audioLanguages,
+                subtitleLanguages,
                 enableTotalRecordCount,
-                enableImages);
+                enableImages).ConfigureAwait(false);
     }
 }

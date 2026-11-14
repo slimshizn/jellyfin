@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.WebSockets;
@@ -12,7 +13,6 @@ using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Net.WebSocketMessages;
 using MediaBrowser.Controller.Net.WebSocketMessages.Outbound;
 using MediaBrowser.Model.Session;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.HttpServer
@@ -58,7 +58,7 @@ namespace Emby.Server.Implementations.HttpServer
             RemoteEndPoint = remoteEndPoint;
 
             _jsonOptions = JsonDefaults.Options;
-            LastActivityDate = DateTime.Now;
+            LastActivityDate = DateTime.UtcNow;
         }
 
         /// <inheritdoc />
@@ -69,6 +69,11 @@ namespace Emby.Server.Implementations.HttpServer
 
         /// <inheritdoc />
         public IPAddress? RemoteEndPoint { get; }
+
+        /// <summary>
+        /// Gets or initializes the UI culture captured from the upgrade request.
+        /// </summary>
+        public CultureInfo? RequestUICulture { get; init; }
 
         /// <inheritdoc />
         public Func<WebSocketMessageInfo, Task>? OnReceive { get; set; }
@@ -83,17 +88,28 @@ namespace Emby.Server.Implementations.HttpServer
         public WebSocketState State => _socket.State;
 
         /// <inheritdoc />
-        public Task SendAsync(OutboundWebSocketMessage message, CancellationToken cancellationToken)
+        public void ApplyRequestCulture()
         {
-            var json = JsonSerializer.SerializeToUtf8Bytes(message, _jsonOptions);
-            return _socket.SendAsync(json, WebSocketMessageType.Text, true, cancellationToken);
+            if (RequestUICulture is null)
+            {
+                return;
+            }
+
+            CultureInfo.CurrentUICulture = RequestUICulture;
         }
 
         /// <inheritdoc />
-        public Task SendAsync<T>(OutboundWebSocketMessage<T> message, CancellationToken cancellationToken)
+        public async Task SendAsync(OutboundWebSocketMessage message, CancellationToken cancellationToken)
         {
             var json = JsonSerializer.SerializeToUtf8Bytes(message, _jsonOptions);
-            return _socket.SendAsync(json, WebSocketMessageType.Text, true, cancellationToken);
+            await _socket.SendAsync(json, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <inheritdoc />
+        public async Task SendAsync<T>(OutboundWebSocketMessage<T> message, CancellationToken cancellationToken)
+        {
+            var json = JsonSerializer.SerializeToUtf8Bytes(message, _jsonOptions);
+            await _socket.SendAsync(json, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
         }
 
         /// <inheritdoc />
@@ -102,22 +118,26 @@ namespace Emby.Server.Implementations.HttpServer
             var pipe = new Pipe();
             var writer = pipe.Writer;
 
-            ValueWebSocketReceiveResult receiveresult;
+            ValueWebSocketReceiveResult receiveResult;
             do
             {
                 // Allocate at least 512 bytes from the PipeWriter
                 Memory<byte> memory = writer.GetMemory(512);
                 try
                 {
-                    receiveresult = await _socket.ReceiveAsync(memory, cancellationToken).ConfigureAwait(false);
+                    receiveResult = await _socket.ReceiveAsync(memory, cancellationToken).ConfigureAwait(false);
                 }
-                catch (WebSocketException ex)
+                catch (Exception ex) when (IsConnectionGone(ex))
                 {
+                    // ObjectDisposedException/OperationCanceledException: the socket was torn
+                    // down underneath us (e.g. by the keep-alive watchdog after the connection
+                    // was declared lost). Fall through so Closed is still raised and the
+                    // session can release this connection.
                     _logger.LogWarning("WS {IP} error receiving data: {Message}", RemoteEndPoint, ex.Message);
                     break;
                 }
 
-                int bytesRead = receiveresult.Count;
+                int bytesRead = receiveResult.Count;
                 if (bytesRead == 0)
                 {
                     break;
@@ -136,13 +156,21 @@ namespace Emby.Server.Implementations.HttpServer
 
                 LastActivityDate = DateTime.UtcNow;
 
-                if (receiveresult.EndOfMessage)
+                if (receiveResult.EndOfMessage)
                 {
-                    await ProcessInternal(pipe.Reader).ConfigureAwait(false);
+                    try
+                    {
+                        await ProcessInternal(pipe.Reader).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (IsConnectionGone(ex))
+                    {
+                        _logger.LogWarning("WS {IP} error sending data: {Message}", RemoteEndPoint, ex.Message);
+                        break;
+                    }
                 }
             }
             while ((_socket.State == WebSocketState.Open || _socket.State == WebSocketState.Connecting)
-                && receiveresult.MessageType != WebSocketMessageType.Close);
+                && receiveResult.MessageType != WebSocketMessageType.Close);
 
             Closed?.Invoke(this, EventArgs.Empty);
 
@@ -150,12 +178,23 @@ namespace Emby.Server.Implementations.HttpServer
                 || _socket.State == WebSocketState.CloseReceived
                 || _socket.State == WebSocketState.CloseSent)
             {
-                await _socket.CloseAsync(
-                    WebSocketCloseStatus.NormalClosure,
-                    string.Empty,
-                    cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await _socket.CloseAsync(
+                        WebSocketCloseStatus.NormalClosure,
+                        string.Empty,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (IsConnectionGone(ex))
+                {
+                    // The peer is already gone, there is nobody left to send the close frame to.
+                    _logger.LogDebug("WS {IP} error closing connection: {Message}", RemoteEndPoint, ex.Message);
+                }
             }
         }
+
+        private static bool IsConnectionGone(Exception ex)
+            => ex is WebSocketException or ObjectDisposedException or OperationCanceledException;
 
         private async Task ProcessInternal(PipeReader reader)
         {
@@ -200,13 +239,20 @@ namespace Emby.Server.Implementations.HttpServer
             }
             else
             {
-                await OnReceive(
-                    new WebSocketMessageInfo
-                    {
-                        MessageType = stub.MessageType,
-                        Data = stub.Data?.ToString(), // Data can be null
-                        Connection = this
-                    }).ConfigureAwait(false);
+                try
+                {
+                    await OnReceive(
+                        new WebSocketMessageInfo
+                        {
+                            MessageType = stub.MessageType,
+                            Data = stub.Data?.ToString(), // Data can be null
+                            Connection = this
+                        }).ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogWarning(exception, "Failed to process WebSocket message");
+                }
             }
         }
 
@@ -218,12 +264,12 @@ namespace Emby.Server.Implementations.HttpServer
             return ret;
         }
 
-        private Task SendKeepAliveResponse()
+        private async Task SendKeepAliveResponse()
         {
             LastKeepAliveDate = DateTime.UtcNow;
-            return SendAsync(
+            await SendAsync(
                 new OutboundKeepAliveMessage(),
-                CancellationToken.None);
+                CancellationToken.None).ConfigureAwait(false);
         }
 
         /// <inheritdoc />

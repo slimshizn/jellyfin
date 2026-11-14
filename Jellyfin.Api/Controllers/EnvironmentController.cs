@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
 using System.Linq;
-using Jellyfin.Api.Constants;
 using Jellyfin.Api.Models.EnvironmentDtos;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Model.IO;
 using Microsoft.AspNetCore.Authorization;
@@ -128,20 +128,6 @@ public class EnvironmentController : BaseJellyfinApiController
     }
 
     /// <summary>
-    /// Gets network paths.
-    /// </summary>
-    /// <response code="200">Empty array returned.</response>
-    /// <returns>List of entries.</returns>
-    [Obsolete("This endpoint is obsolete.")]
-    [HttpGet("NetworkShares")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<FileSystemEntryInfo>> GetNetworkShares()
-    {
-        _logger.LogWarning("Obsolete endpoint accessed: /Environment/NetworkShares");
-        return Array.Empty<FileSystemEntryInfo>();
-    }
-
-    /// <summary>
     /// Gets available drives from the server's file system.
     /// </summary>
     /// <response code="200">List of entries returned.</response>
@@ -168,7 +154,7 @@ public class EnvironmentController : BaseJellyfinApiController
             // Check if unc share
             var index = path.LastIndexOf(UncSeparator);
 
-            if (index != -1 && path.IndexOf(UncSeparator, StringComparison.OrdinalIgnoreCase) == 0)
+            if (index != -1 && path[0] == UncSeparator)
             {
                 parent = path.Substring(0, index);
 

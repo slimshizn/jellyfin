@@ -1,28 +1,29 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
-using System.Net.Http;
 using System.Net.Mime;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Attributes;
-using Jellyfin.Api.Constants;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Api.Models.LiveTvDtos;
 using Jellyfin.Data.Enums;
-using MediaBrowser.Common.Configuration;
-using MediaBrowser.Common.Net;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.LiveTv;
@@ -40,43 +41,55 @@ namespace Jellyfin.Api.Controllers;
 public class LiveTvController : BaseJellyfinApiController
 {
     private readonly ILiveTvManager _liveTvManager;
+    private readonly IGuideManager _guideManager;
+    private readonly ITunerHostManager _tunerHostManager;
+    private readonly IListingsManager _listingsManager;
+    private readonly IRecordingsManager _recordingsManager;
     private readonly IUserManager _userManager;
-    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILibraryManager _libraryManager;
     private readonly IDtoService _dtoService;
     private readonly IMediaSourceManager _mediaSourceManager;
-    private readonly IConfigurationManager _configurationManager;
-    private readonly TranscodingJobHelper _transcodingJobHelper;
+    private readonly ITranscodeManager _transcodeManager;
+    private readonly ISchedulesDirectService _schedulesDirectService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LiveTvController"/> class.
     /// </summary>
     /// <param name="liveTvManager">Instance of the <see cref="ILiveTvManager"/> interface.</param>
+    /// <param name="guideManager">Instance of the <see cref="IGuideManager"/> interface.</param>
+    /// <param name="tunerHostManager">Instance of the <see cref="ITunerHostManager"/> interface.</param>
+    /// <param name="listingsManager">Instance of the <see cref="IListingsManager"/> interface.</param>
+    /// <param name="recordingsManager">Instance of the <see cref="IRecordingsManager"/> interface.</param>
     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
-    /// <param name="httpClientFactory">Instance of the <see cref="IHttpClientFactory"/> interface.</param>
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="mediaSourceManager">Instance of the <see cref="IMediaSourceManager"/> interface.</param>
-    /// <param name="configurationManager">Instance of the <see cref="IConfigurationManager"/> interface.</param>
-    /// <param name="transcodingJobHelper">Instance of the <see cref="TranscodingJobHelper"/> class.</param>
+    /// <param name="transcodeManager">Instance of the <see cref="ITranscodeManager"/> interface.</param>
+    /// <param name="schedulesDirectService">Instance of the <see cref="ISchedulesDirectService"/> interface.</param>
     public LiveTvController(
         ILiveTvManager liveTvManager,
+        IGuideManager guideManager,
+        ITunerHostManager tunerHostManager,
+        IListingsManager listingsManager,
+        IRecordingsManager recordingsManager,
         IUserManager userManager,
-        IHttpClientFactory httpClientFactory,
         ILibraryManager libraryManager,
         IDtoService dtoService,
         IMediaSourceManager mediaSourceManager,
-        IConfigurationManager configurationManager,
-        TranscodingJobHelper transcodingJobHelper)
+        ITranscodeManager transcodeManager,
+        ISchedulesDirectService schedulesDirectService)
     {
         _liveTvManager = liveTvManager;
+        _guideManager = guideManager;
+        _tunerHostManager = tunerHostManager;
+        _listingsManager = listingsManager;
+        _recordingsManager = recordingsManager;
         _userManager = userManager;
-        _httpClientFactory = httpClientFactory;
         _libraryManager = libraryManager;
         _dtoService = dtoService;
         _mediaSourceManager = mediaSourceManager;
-        _configurationManager = configurationManager;
-        _transcodingJobHelper = transcodingJobHelper;
+        _transcodeManager = transcodeManager;
+        _schedulesDirectService = schedulesDirectService;
     }
 
     /// <summary>
@@ -140,17 +153,16 @@ public class LiveTvController : BaseJellyfinApiController
         [FromQuery] bool? isDisliked,
         [FromQuery] bool? enableImages,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
         [FromQuery] bool? enableUserData,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
         [FromQuery] SortOrder? sortOrder,
         [FromQuery] bool enableFavoriteSorting = false,
         [FromQuery] bool addCurrentProgram = true)
     {
         userId = RequestHelpers.GetUserId(User, userId);
         var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
             .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
 
         var channelResult = _liveTvManager.GetInternalChannels(
@@ -176,7 +188,7 @@ public class LiveTvController : BaseJellyfinApiController
             dtoOptions,
             CancellationToken.None);
 
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
 
@@ -201,22 +213,28 @@ public class LiveTvController : BaseJellyfinApiController
     /// <param name="channelId">Channel id.</param>
     /// <param name="userId">Optional. Attach user data.</param>
     /// <response code="200">Live tv channel returned.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>An <see cref="OkResult"/> containing the live tv channel.</returns>
     [HttpGet("Channels/{channelId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [Authorize(Policy = Policies.LiveTvAccess)]
     public ActionResult<BaseItemDto> GetChannel([FromRoute, Required] Guid channelId, [FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
-        var item = channelId.Equals(default)
+        var item = channelId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(channelId);
+            : _libraryManager.GetItemById<BaseItem>(channelId, user);
 
-        var dtoOptions = new DtoOptions()
-            .AddClientFields(User);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var dtoOptions = new DtoOptions();
         return _dtoService.GetBaseItemDto(item, dtoOptions, user);
     }
 
@@ -257,8 +275,8 @@ public class LiveTvController : BaseJellyfinApiController
         [FromQuery] string? seriesTimerId,
         [FromQuery] bool? enableImages,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
         [FromQuery] bool? enableUserData,
         [FromQuery] bool? isMovie,
         [FromQuery] bool? isSeries,
@@ -270,7 +288,6 @@ public class LiveTvController : BaseJellyfinApiController
     {
         userId = RequestHelpers.GetUserId(User, userId);
         var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
             .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
 
         return await _liveTvManager.GetRecordingsAsync(
@@ -320,20 +337,7 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Authorize(Policy = Policies.LiveTvAccess)]
     [Obsolete("This endpoint is obsolete.")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "channelId", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "userId", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "groupId", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "startIndex", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "limit", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "status", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "isInProgress", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "seriesTimerId", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "enableImages", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "imageTypeLimit", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "enableImageTypes", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "fields", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "enableUserData", Justification = "Imported from ServiceStack")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "enableTotalRecordCount", Justification = "Imported from ServiceStack")]
+    [ApiExplorerSettings(IgnoreApi = true)]
     public ActionResult<QueryResult<BaseItemDto>> GetRecordingsSeries(
         [FromQuery] string? channelId,
         [FromQuery] Guid? userId,
@@ -345,8 +349,8 @@ public class LiveTvController : BaseJellyfinApiController
         [FromQuery] string? seriesTimerId,
         [FromQuery] bool? enableImages,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
         [FromQuery] bool? enableUserData,
         [FromQuery] bool enableTotalRecordCount = true)
     {
@@ -363,7 +367,7 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Authorize(Policy = Policies.LiveTvAccess)]
     [Obsolete("This endpoint is obsolete.")]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "userId", Justification = "Imported from ServiceStack")]
+    [ApiExplorerSettings(IgnoreApi = true)]
     public ActionResult<QueryResult<BaseItemDto>> GetRecordingGroups([FromQuery] Guid? userId)
     {
         return new QueryResult<BaseItemDto>();
@@ -381,7 +385,7 @@ public class LiveTvController : BaseJellyfinApiController
     public async Task<ActionResult<QueryResult<BaseItemDto>>> GetRecordingFolders([FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
         var folders = await _liveTvManager.GetRecordingFoldersAsync(user).ConfigureAwait(false);
@@ -397,20 +401,27 @@ public class LiveTvController : BaseJellyfinApiController
     /// <param name="recordingId">Recording id.</param>
     /// <param name="userId">Optional. Attach user data.</param>
     /// <response code="200">Recording returned.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>An <see cref="OkResult"/> containing the live tv recording.</returns>
     [HttpGet("Recordings/{recordingId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [Authorize(Policy = Policies.LiveTvAccess)]
     public ActionResult<BaseItemDto> GetRecording([FromRoute, Required] Guid recordingId, [FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
-        var item = recordingId.Equals(default) ? _libraryManager.GetUserRootFolder() : _libraryManager.GetItemById(recordingId);
+        var item = recordingId.IsEmpty()
+            ? _libraryManager.GetUserRootFolder()
+            : _libraryManager.GetItemById<BaseItem>(recordingId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
 
-        var dtoOptions = new DtoOptions()
-            .AddClientFields(User);
+        var dtoOptions = new DtoOptions();
 
         return _dtoService.GetBaseItemDto(item, dtoOptions, user);
     }
@@ -423,7 +434,7 @@ public class LiveTvController : BaseJellyfinApiController
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpPost("Tuners/{tunerId}/Reset")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     public async Task<ActionResult> ResetTuner([FromRoute, Required] string tunerId)
     {
         await _liveTvManager.ResetTuner(tunerId, CancellationToken.None).ConfigureAwait(false);
@@ -532,7 +543,7 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Authorize(Policy = Policies.LiveTvAccess)]
     public async Task<ActionResult<QueryResult<BaseItemDto>>> GetLiveTvPrograms(
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] channelIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] channelIds,
         [FromQuery] Guid? userId,
         [FromQuery] DateTime? minStartDate,
         [FromQuery] bool? hasAired,
@@ -547,21 +558,21 @@ public class LiveTvController : BaseJellyfinApiController
         [FromQuery] bool? isSports,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] genres,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] genres,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
         [FromQuery] bool? enableImages,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] bool? enableUserData,
         [FromQuery] string? seriesTimerId,
         [FromQuery] Guid? librarySeriesId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
         [FromQuery] bool enableTotalRecordCount = true)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
 
@@ -588,18 +599,18 @@ public class LiveTvController : BaseJellyfinApiController
             GenreIds = genreIds
         };
 
-        if (librarySeriesId.HasValue && !librarySeriesId.Equals(default))
+        if (!librarySeriesId.IsNullOrEmpty())
         {
             query.IsSeries = true;
 
-            if (_libraryManager.GetItemById(librarySeriesId.Value) is Series series)
+            var series = _libraryManager.GetItemById<Series>(librarySeriesId.Value);
+            if (series is not null)
             {
                 query.Name = series.Name;
             }
         }
 
         var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
             .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
         return await _liveTvManager.GetPrograms(query, dtoOptions, CancellationToken.None).ConfigureAwait(false);
     }
@@ -617,11 +628,11 @@ public class LiveTvController : BaseJellyfinApiController
     [Authorize(Policy = Policies.LiveTvAccess)]
     public async Task<ActionResult<QueryResult<BaseItemDto>>> GetPrograms([FromBody] GetProgramsDto body)
     {
-        var user = body.UserId.Equals(default) ? null : _userManager.GetUserById(body.UserId);
+        var user = body.UserId.IsNullOrEmpty() ? null : _userManager.GetUserById(body.UserId.Value);
 
         var query = new InternalItemsQuery(user)
         {
-            ChannelIds = body.ChannelIds,
+            ChannelIds = body.ChannelIds ?? [],
             HasAired = body.HasAired,
             IsAiring = body.IsAiring,
             EnableTotalRecordCount = body.EnableTotalRecordCount,
@@ -631,30 +642,30 @@ public class LiveTvController : BaseJellyfinApiController
             MaxEndDate = body.MaxEndDate,
             StartIndex = body.StartIndex,
             Limit = body.Limit,
-            OrderBy = RequestHelpers.GetOrderBy(body.SortBy, body.SortOrder),
+            OrderBy = RequestHelpers.GetOrderBy(body.SortBy ?? [], body.SortOrder ?? []),
             IsNews = body.IsNews,
             IsMovie = body.IsMovie,
             IsSeries = body.IsSeries,
             IsKids = body.IsKids,
             IsSports = body.IsSports,
             SeriesTimerId = body.SeriesTimerId,
-            Genres = body.Genres,
-            GenreIds = body.GenreIds
+            Genres = body.Genres ?? [],
+            GenreIds = body.GenreIds ?? []
         };
 
-        if (!body.LibrarySeriesId.Equals(default))
+        if (!body.LibrarySeriesId.IsNullOrEmpty())
         {
             query.IsSeries = true;
 
-            if (_libraryManager.GetItemById(body.LibrarySeriesId) is Series series)
+            var series = _libraryManager.GetItemById<Series>(body.LibrarySeriesId.Value);
+            if (series is not null)
             {
                 query.Name = series.Name;
             }
         }
 
-        var dtoOptions = new DtoOptions { Fields = body.Fields }
-            .AddClientFields(User)
-            .AddAdditionalDtoOptions(body.EnableImages, body.EnableUserData, body.ImageTypeLimit, body.EnableImageTypes);
+        var dtoOptions = new DtoOptions { Fields = body.Fields ?? [] }
+            .AddAdditionalDtoOptions(body.EnableImages, body.EnableUserData, body.ImageTypeLimit, body.EnableImageTypes ?? []);
         return await _liveTvManager.GetPrograms(query, dtoOptions, CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -662,6 +673,7 @@ public class LiveTvController : BaseJellyfinApiController
     /// Gets recommended live tv epgs.
     /// </summary>
     /// <param name="userId">Optional. filter by user id.</param>
+    /// <param name="startIndex">Optional. The record index to start at. All items with a lower index will be dropped from the results.</param>
     /// <param name="limit">Optional. The maximum number of records to return.</param>
     /// <param name="isAiring">Optional. Filter by programs that are currently airing, or not.</param>
     /// <param name="hasAired">Optional. Filter by programs that have completed airing, or not.</param>
@@ -684,6 +696,7 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<ActionResult<QueryResult<BaseItemDto>>> GetRecommendedPrograms(
         [FromQuery] Guid? userId,
+        [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] bool? isAiring,
         [FromQuery] bool? hasAired,
@@ -694,20 +707,21 @@ public class LiveTvController : BaseJellyfinApiController
         [FromQuery] bool? isSports,
         [FromQuery] bool? enableImages,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
         [FromQuery] bool? enableUserData,
         [FromQuery] bool enableTotalRecordCount = true)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
 
         var query = new InternalItemsQuery(user)
         {
             IsAiring = isAiring,
+            StartIndex = startIndex,
             Limit = limit,
             HasAired = hasAired,
             IsSeries = isSeries,
@@ -720,7 +734,6 @@ public class LiveTvController : BaseJellyfinApiController
         };
 
         var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
             .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
         return await _liveTvManager.GetRecommendedProgramsAsync(query, dtoOptions, CancellationToken.None).ConfigureAwait(false);
     }
@@ -731,20 +744,28 @@ public class LiveTvController : BaseJellyfinApiController
     /// <param name="programId">Program id.</param>
     /// <param name="userId">Optional. Attach user data.</param>
     /// <response code="200">Program returned.</response>
+    /// <response code="404">Program not found.</response>
     /// <returns>An <see cref="OkResult"/> containing the livetv program.</returns>
     [HttpGet("Programs/{programId}")]
     [Authorize(Policy = Policies.LiveTvAccess)]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<BaseItemDto>> GetProgram(
         [FromRoute, Required] string programId,
         [FromQuery] Guid? userId)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
+        var result = await _liveTvManager.GetProgram(programId, CancellationToken.None, user).ConfigureAwait(false);
 
-        return await _liveTvManager.GetProgram(programId, CancellationToken.None, user).ConfigureAwait(false);
+        if (result is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(result);
     }
 
     /// <summary>
@@ -760,7 +781,7 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult DeleteRecording([FromRoute, Required] Guid recordingId)
     {
-        var item = _libraryManager.GetItemById(recordingId);
+        var item = _libraryManager.GetItemById<BaseItem>(recordingId, User.GetUserId());
         if (item is null)
         {
             return NotFound();
@@ -799,7 +820,6 @@ public class LiveTvController : BaseJellyfinApiController
     [HttpPost("Timers/{timerId}")]
     [Authorize(Policy = Policies.LiveTvManagement)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "timerId", Justification = "Imported from ServiceStack")]
     public async Task<ActionResult> UpdateTimer([FromRoute, Required] string timerId, [FromBody] TimerInfoDto timerInfo)
     {
         await _liveTvManager.UpdateTimer(timerInfo, CancellationToken.None).ConfigureAwait(false);
@@ -889,7 +909,6 @@ public class LiveTvController : BaseJellyfinApiController
     [HttpPost("SeriesTimers/{timerId}")]
     [Authorize(Policy = Policies.LiveTvManagement)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "timerId", Justification = "Imported from ServiceStack")]
     public async Task<ActionResult> UpdateSeriesTimer([FromRoute, Required] string timerId, [FromBody] SeriesTimerInfoDto seriesTimerInfo)
     {
         await _liveTvManager.UpdateSeriesTimer(seriesTimerInfo, CancellationToken.None).ConfigureAwait(false);
@@ -912,31 +931,15 @@ public class LiveTvController : BaseJellyfinApiController
     }
 
     /// <summary>
-    /// Get recording group.
+    /// Get guide info.
     /// </summary>
-    /// <param name="groupId">Group id.</param>
-    /// <returns>A <see cref="NotFoundResult"/>.</returns>
-    [HttpGet("Recordings/Groups/{groupId}")]
-    [Authorize(Policy = Policies.LiveTvAccess)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [Obsolete("This endpoint is obsolete.")]
-    public ActionResult<BaseItemDto> GetRecordingGroup([FromRoute, Required] Guid groupId)
-    {
-        return NotFound();
-    }
-
-    /// <summary>
-    /// Get guid info.
-    /// </summary>
-    /// <response code="200">Guid info returned.</response>
+    /// <response code="200">Guide info returned.</response>
     /// <returns>An <see cref="OkResult"/> containing the guide info.</returns>
     [HttpGet("GuideInfo")]
     [Authorize(Policy = Policies.LiveTvAccess)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<GuideInfo> GetGuideInfo()
-    {
-        return _liveTvManager.GetGuideInfo();
-    }
+        => _guideManager.GetGuideInfo();
 
     /// <summary>
     /// Adds a tuner host.
@@ -945,12 +948,10 @@ public class LiveTvController : BaseJellyfinApiController
     /// <response code="200">Created tuner host returned.</response>
     /// <returns>A <see cref="OkResult"/> containing the created tuner host.</returns>
     [HttpPost("TunerHosts")]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<ActionResult<TunerHostInfo>> AddTunerHost([FromBody] TunerHostInfo tunerHostInfo)
-    {
-        return await _liveTvManager.SaveTunerHost(tunerHostInfo).ConfigureAwait(false);
-    }
+        => await _tunerHostManager.SaveTunerHost(tunerHostInfo).ConfigureAwait(false);
 
     /// <summary>
     /// Deletes a tuner host.
@@ -959,13 +960,11 @@ public class LiveTvController : BaseJellyfinApiController
     /// <response code="204">Tuner host deleted.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpDelete("TunerHosts")]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public ActionResult DeleteTunerHost([FromQuery] string? id)
     {
-        var config = _configurationManager.GetConfiguration<LiveTvOptions>("livetv");
-        config.TunerHosts = config.TunerHosts.Where(i => !string.Equals(id, i.Id, StringComparison.OrdinalIgnoreCase)).ToArray();
-        _configurationManager.SaveConfiguration("livetv", config);
+        _tunerHostManager.DeleteTunerHost(id);
         return NoContent();
     }
 
@@ -992,7 +991,7 @@ public class LiveTvController : BaseJellyfinApiController
     /// <response code="200">Created listings provider returned.</response>
     /// <returns>A <see cref="OkResult"/> containing the created listings provider.</returns>
     [HttpPost("ListingProviders")]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [SuppressMessage("Microsoft.Performance", "CA5350:RemoveSha1", MessageId = "AddListingProvider", Justification = "Imported from ServiceStack")]
     public async Task<ActionResult<ListingsProviderInfo>> AddListingProvider(
@@ -1003,12 +1002,10 @@ public class LiveTvController : BaseJellyfinApiController
     {
         if (!string.IsNullOrEmpty(pw))
         {
-            // TODO: remove ToLower when Convert.ToHexString supports lowercase
-            // Schedules Direct requires the hex to be lowercase
-            listingsProviderInfo.Password = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(pw))).ToLowerInvariant();
+            listingsProviderInfo.Password = Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(pw)));
         }
 
-        return await _liveTvManager.SaveListingProvider(listingsProviderInfo, validateLogin, validateListings).ConfigureAwait(false);
+        return await _listingsManager.SaveListingProvider(listingsProviderInfo, validateLogin, validateListings).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1018,11 +1015,11 @@ public class LiveTvController : BaseJellyfinApiController
     /// <response code="204">Listing provider deleted.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpDelete("ListingProviders")]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public ActionResult DeleteListingProvider([FromQuery] string? id)
     {
-        _liveTvManager.DeleteListingsProvider(id);
+        _listingsManager.DeleteListingsProvider(id);
         return NoContent();
     }
 
@@ -1043,9 +1040,7 @@ public class LiveTvController : BaseJellyfinApiController
         [FromQuery] string? type,
         [FromQuery] string? location,
         [FromQuery] string? country)
-    {
-        return await _liveTvManager.GetLineups(type, id, country, location).ConfigureAwait(false);
-    }
+        => await _listingsManager.GetLineups(type, id, country, location).ConfigureAwait(false);
 
     /// <summary>
     /// Gets available countries.
@@ -1053,18 +1048,13 @@ public class LiveTvController : BaseJellyfinApiController
     /// <response code="200">Available countries returned.</response>
     /// <returns>A <see cref="FileResult"/> containing the available countries.</returns>
     [HttpGet("ListingProviders/SchedulesDirect/Countries")]
-    [Authorize(Policy = Policies.LiveTvAccess)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesFile(MediaTypeNames.Application.Json)]
     public async Task<ActionResult> GetSchedulesDirectCountries()
     {
-        var client = _httpClientFactory.CreateClient(NamedClient.Default);
-        // https://json.schedulesdirect.org/20141201/available/countries
-        // Can't dispose the response as it's required up the call chain.
-        var response = await client.GetAsync(new Uri("https://json.schedulesdirect.org/20141201/available/countries"))
-            .ConfigureAwait(false);
-
-        return File(await response.Content.ReadAsStreamAsync().ConfigureAwait(false), MediaTypeNames.Application.Json);
+        var stream = await _schedulesDirectService.GetAvailableCountries(CancellationToken.None).ConfigureAwait(false);
+        return File(stream, MediaTypeNames.Application.Json);
     }
 
     /// <summary>
@@ -1074,50 +1064,22 @@ public class LiveTvController : BaseJellyfinApiController
     /// <response code="200">Channel mapping options returned.</response>
     /// <returns>An <see cref="OkResult"/> containing the channel mapping options.</returns>
     [HttpGet("ChannelMappingOptions")]
-    [Authorize(Policy = Policies.LiveTvAccess)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<ChannelMappingOptionsDto>> GetChannelMappingOptions([FromQuery] string? providerId)
-    {
-        var config = _configurationManager.GetConfiguration<LiveTvOptions>("livetv");
-
-        var listingsProviderInfo = config.ListingProviders.First(i => string.Equals(providerId, i.Id, StringComparison.OrdinalIgnoreCase));
-
-        var listingsProviderName = _liveTvManager.ListingProviders.First(i => string.Equals(i.Type, listingsProviderInfo.Type, StringComparison.OrdinalIgnoreCase)).Name;
-
-        var tunerChannels = await _liveTvManager.GetChannelsForListingsProvider(providerId, CancellationToken.None)
-            .ConfigureAwait(false);
-
-        var providerChannels = await _liveTvManager.GetChannelsFromListingsProviderData(providerId, CancellationToken.None)
-            .ConfigureAwait(false);
-
-        var mappings = listingsProviderInfo.ChannelMappings;
-
-        return new ChannelMappingOptionsDto
-        {
-            TunerChannels = tunerChannels.Select(i => _liveTvManager.GetTunerChannelMapping(i, mappings, providerChannels)).ToList(),
-            ProviderChannels = providerChannels.Select(i => new NameIdPair
-            {
-                Name = i.Name,
-                Id = i.Id
-            }).ToList(),
-            Mappings = mappings,
-            ProviderName = listingsProviderName
-        };
-    }
+    public Task<ChannelMappingOptionsDto> GetChannelMappingOptions([FromQuery] string? providerId)
+        => _listingsManager.GetChannelMappingOptions(providerId);
 
     /// <summary>
     /// Set channel mappings.
     /// </summary>
-    /// <param name="setChannelMappingDto">The set channel mapping dto.</param>
+    /// <param name="dto">The set channel mapping dto.</param>
     /// <response code="200">Created channel mapping returned.</response>
     /// <returns>An <see cref="OkResult"/> containing the created channel mapping.</returns>
     [HttpPost("ChannelMappings")]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<TunerChannelMapping>> SetChannelMapping([FromBody, Required] SetChannelMappingDto setChannelMappingDto)
-    {
-        return await _liveTvManager.SetChannelMapping(setChannelMappingDto.ProviderId, setChannelMappingDto.TunerChannelId, setChannelMappingDto.ProviderChannelId).ConfigureAwait(false);
-    }
+    public Task<TunerChannelMapping> SetChannelMapping([FromBody, Required] SetChannelMappingDto dto)
+        => _listingsManager.SetChannelMapping(dto.ProviderId, dto.TunerChannelId, dto.ProviderChannelId);
 
     /// <summary>
     /// Get tuner host types.
@@ -1127,10 +1089,8 @@ public class LiveTvController : BaseJellyfinApiController
     [HttpGet("TunerHosts/Types")]
     [Authorize(Policy = Policies.LiveTvAccess)]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<NameIdPair>> GetTunerHostTypes()
-    {
-        return _liveTvManager.GetTunerHostTypes();
-    }
+    public IEnumerable<NameIdPair> GetTunerHostTypes()
+        => _tunerHostManager.GetTunerHostTypes();
 
     /// <summary>
     /// Discover tuners.
@@ -1140,12 +1100,10 @@ public class LiveTvController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the tuners.</returns>
     [HttpGet("Tuners/Discvover", Name = "DiscvoverTuners")]
     [HttpGet("Tuners/Discover")]
-    [Authorize(Policy = Policies.LiveTvManagement)]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<IEnumerable<TunerHostInfo>>> DiscoverTuners([FromQuery] bool newDevicesOnly = false)
-    {
-        return await _liveTvManager.DiscoverTuners(newDevicesOnly, CancellationToken.None).ConfigureAwait(false);
-    }
+    public IAsyncEnumerable<TunerHostInfo> DiscoverTuners([FromQuery] bool newDevicesOnly = false)
+        => _tunerHostManager.DiscoverTuners(newDevicesOnly);
 
     /// <summary>
     /// Gets a live tv recording stream.
@@ -1163,14 +1121,13 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesVideoFile]
     public ActionResult GetLiveRecordingFile([FromRoute, Required] string recordingId)
     {
-        var path = _liveTvManager.GetEmbyTvActiveRecordingPath(recordingId);
-
+        var path = _recordingsManager.GetActiveRecordingPath(recordingId);
         if (string.IsNullOrWhiteSpace(path))
         {
             return NotFound();
         }
 
-        var stream = new ProgressiveFileStream(path, null, _transcodingJobHelper);
+        var stream = new ProgressiveFileStream(path, null, _transcodeManager);
         return new FileStreamResult(stream, MimeTypes.GetMimeType(path));
     }
 
@@ -1189,7 +1146,9 @@ public class LiveTvController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesVideoFile]
-    public ActionResult GetLiveStreamFile([FromRoute, Required] string streamId, [FromRoute, Required] string container)
+    public ActionResult GetLiveStreamFile(
+        [FromRoute, Required] string streamId,
+        [FromRoute, Required][RegularExpression(EncodingHelper.ContainerValidationRegexStr)] string container)
     {
         var liveStreamInfo = _mediaSourceManager.GetLiveStreamInfoByUniqueId(streamId);
         if (liveStreamInfo is null)

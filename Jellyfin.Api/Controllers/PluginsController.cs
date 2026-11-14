@@ -6,8 +6,9 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Jellyfin.Api.Attributes;
-using Jellyfin.Api.Constants;
+using Jellyfin.Extensions;
 using Jellyfin.Extensions.Json;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Common.Updates;
 using MediaBrowser.Model.Net;
@@ -21,7 +22,8 @@ namespace Jellyfin.Api.Controllers;
 /// <summary>
 /// Plugins controller.
 /// </summary>
-[Authorize]
+[Authorize(Policy = Policies.RequiresElevation)]
+[Tags("Plugin")]
 public class PluginsController : BaseJellyfinApiController
 {
     private readonly IInstallationManager _installationManager;
@@ -65,7 +67,6 @@ public class PluginsController : BaseJellyfinApiController
     /// <response code="404">Plugin not found.</response>
     /// <returns>An <see cref="NoContentResult"/> on success, or a <see cref="NotFoundResult"/> if the plugin could not be found.</returns>
     [HttpPost("{pluginId}/{version}/Enable")]
-    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult EnablePlugin([FromRoute, Required] Guid pluginId, [FromRoute, Required] Version version)
@@ -89,7 +90,6 @@ public class PluginsController : BaseJellyfinApiController
     /// <response code="404">Plugin not found.</response>
     /// <returns>An <see cref="NoContentResult"/> on success, or a <see cref="NotFoundResult"/> if the plugin could not be found.</returns>
     [HttpPost("{pluginId}/{version}/Disable")]
-    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult DisablePlugin([FromRoute, Required] Guid pluginId, [FromRoute, Required] Version version)
@@ -113,7 +113,6 @@ public class PluginsController : BaseJellyfinApiController
     /// <response code="404">Plugin not found.</response>
     /// <returns>An <see cref="NoContentResult"/> on success, or a <see cref="NotFoundResult"/> if the plugin could not be found.</returns>
     [HttpDelete("{pluginId}/{version}")]
-    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult UninstallPluginByVersion([FromRoute, Required] Guid pluginId, [FromRoute, Required] Version version)
@@ -136,10 +135,8 @@ public class PluginsController : BaseJellyfinApiController
     /// <response code="404">Plugin not found.</response>
     /// <returns>An <see cref="NoContentResult"/> on success, or a <see cref="NotFoundResult"/> if the plugin could not be found.</returns>
     [HttpDelete("{pluginId}")]
-    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [Obsolete("Please use the UninstallPluginByVersion API.")]
     public ActionResult UninstallPlugin([FromRoute, Required] Guid pluginId)
     {
         // If no version is given, return the current instance.
@@ -230,14 +227,35 @@ public class PluginsController : BaseJellyfinApiController
             return NotFound();
         }
 
-        var imagePath = Path.Combine(plugin.Path, plugin.Manifest.ImagePath ?? string.Empty);
-        if (plugin.Manifest.ImagePath is null || !System.IO.File.Exists(imagePath))
+        string? imagePath = plugin.Manifest.ImagePath;
+        if (!string.IsNullOrWhiteSpace(imagePath))
         {
-            return NotFound();
+            var pluginPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(plugin.Path));
+            imagePath = Path.GetFullPath(imagePath, pluginPath);
+            // Require a separator after the plugin path so a sibling like "<pluginPath>-evil" can't pass.
+            if (imagePath.StartsWith(pluginPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) is false || System.IO.File.Exists(imagePath) is false)
+            {
+                return NotFound();
+            }
+
+            Response.Headers.ContentDisposition = "attachment";
+            return PhysicalFile(imagePath, MimeTypes.GetMimeType(imagePath));
         }
 
-        imagePath = Path.Combine(plugin.Path, plugin.Manifest.ImagePath);
-        return PhysicalFile(imagePath, MimeTypes.GetMimeType(imagePath));
+        var resourceName = plugin.Manifest.ImageResourceName;
+        if (!string.IsNullOrEmpty(resourceName) && plugin.Instance is not null)
+        {
+            var stream = plugin.Instance.GetType().Assembly.GetManifestResourceStream(resourceName);
+            if (stream is null)
+            {
+                return NotFound();
+            }
+
+            Response.Headers.ContentDisposition = "attachment";
+            return File(stream, MimeTypes.GetMimeType(resourceName));
+        }
+
+        return NotFound();
     }
 
     /// <summary>

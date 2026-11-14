@@ -4,7 +4,6 @@
 
 using System.Net;
 using MediaBrowser.Common;
-using MediaBrowser.Model.System;
 using Microsoft.AspNetCore.Http;
 
 namespace MediaBrowser.Controller
@@ -15,8 +14,6 @@ namespace MediaBrowser.Controller
     public interface IServerApplicationHost : IApplicationHost
     {
         bool CoreStartupHasCompleted { get; }
-
-        bool CanLaunchWebBrowser { get; }
 
         /// <summary>
         /// Gets the HTTP server port.
@@ -42,13 +39,9 @@ namespace MediaBrowser.Controller
         string FriendlyName { get; }
 
         /// <summary>
-        /// Gets the system info.
+        /// Gets or sets the path to the backup archive used to restore upon restart.
         /// </summary>
-        /// <param name="request">The HTTP request.</param>
-        /// <returns>SystemInfo.</returns>
-        SystemInfo GetSystemInfo(HttpRequest request);
-
-        PublicSystemInfo GetPublicSystemInfo(HttpRequest request);
+        string RestoreBackupPath { get; set; }
 
         /// <summary>
         /// Gets a URL specific for the request.

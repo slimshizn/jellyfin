@@ -1,43 +1,53 @@
-#pragma warning disable CS1591
-
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Emby.Server.Implementations.Library;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.IO
 {
-    public class LibraryMonitor : ILibraryMonitor
+    /// <inheritdoc cref="ILibraryMonitor" />
+    public sealed class LibraryMonitor : ILibraryMonitor, IDisposable
     {
         private readonly ILogger<LibraryMonitor> _logger;
         private readonly ILibraryManager _libraryManager;
         private readonly IServerConfigurationManager _configurationManager;
         private readonly IFileSystem _fileSystem;
+        private readonly IDirectoryService _directoryService;
+        private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
 
         /// <summary>
         /// The file system watchers.
         /// </summary>
-        private readonly ConcurrentDictionary<string, FileSystemWatcher> _fileSystemWatchers = new ConcurrentDictionary<string, FileSystemWatcher>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, FileSystemWatcher> _fileSystemWatchers = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// The affected paths.
         /// </summary>
-        private readonly List<FileRefresher> _activeRefreshers = new List<FileRefresher>();
+        private readonly List<FileRefresher> _activeRefreshers = [];
 
         /// <summary>
         /// A dynamic list of paths that should be ignored.  Added to during our own file system modifications.
         /// </summary>
-        private readonly ConcurrentDictionary<string, string> _tempIgnoredPaths = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, string> _tempIgnoredPaths = new(StringComparer.OrdinalIgnoreCase);
 
-        private bool _disposed = false;
+        /// <summary>
+        /// Incremented by every <see cref="Stop"/> so watchers still being created on a background
+        /// task can tell that the sweep they should have been caught by has already run.
+        /// </summary>
+        private int _watcherGeneration;
+
+        private bool _disposed;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="LibraryMonitor" /> class.
@@ -46,34 +56,38 @@ namespace Emby.Server.Implementations.IO
         /// <param name="libraryManager">The library manager.</param>
         /// <param name="configurationManager">The configuration manager.</param>
         /// <param name="fileSystem">The filesystem.</param>
+        /// <param name="directoryService">The directory service.</param>
+        /// <param name="appLifetime">The <see cref="IHostApplicationLifetime"/>.</param>
+        /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
         public LibraryMonitor(
             ILogger<LibraryMonitor> logger,
             ILibraryManager libraryManager,
             IServerConfigurationManager configurationManager,
-            IFileSystem fileSystem)
+            IFileSystem fileSystem,
+            IDirectoryService directoryService,
+            IHostApplicationLifetime appLifetime,
+            DotIgnoreIgnoreRule dotIgnoreIgnoreRule)
         {
             _libraryManager = libraryManager;
             _logger = logger;
             _configurationManager = configurationManager;
             _fileSystem = fileSystem;
+            _directoryService = directoryService;
+            _dotIgnoreIgnoreRule = dotIgnoreIgnoreRule;
+
+            appLifetime.ApplicationStarted.Register(Start);
+            appLifetime.ApplicationStopping.Register(Dispose);
         }
 
-        /// <summary>
-        /// Add the path to our temporary ignore list.  Use when writing to a path within our listening scope.
-        /// </summary>
-        /// <param name="path">The path.</param>
-        private void TemporarilyIgnore(string path)
-        {
-            _tempIgnoredPaths[path] = path;
-        }
-
+        /// <inheritdoc />
         public void ReportFileSystemChangeBeginning(string path)
         {
             ArgumentException.ThrowIfNullOrEmpty(path);
 
-            TemporarilyIgnore(path);
+            _tempIgnoredPaths[path] = path;
         }
 
+        /// <inheritdoc />
         public async void ReportFileSystemChangeComplete(string path, bool refreshPath)
         {
             ArgumentException.ThrowIfNullOrEmpty(path);
@@ -107,16 +121,17 @@ namespace Emby.Server.Implementations.IO
 
             var options = _libraryManager.GetLibraryOptions(item);
 
-            if (options is not null)
-            {
-                return options.EnableRealtimeMonitor;
-            }
-
-            return false;
+            return options is not null && options.EnableRealtimeMonitor;
         }
 
+        /// <inheritdoc />
         public void Start()
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             _libraryManager.ItemAdded += OnLibraryManagerItemAdded;
             _libraryManager.ItemRemoved += OnLibraryManagerItemRemoved;
 
@@ -128,7 +143,7 @@ namespace Emby.Server.Implementations.IO
                 .Where(IsLibraryMonitorEnabled)
                 .OfType<Folder>()
                 .SelectMany(f => f.PhysicalLocations)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Distinct()
                 .Order();
 
             foreach (var path in paths)
@@ -230,6 +245,8 @@ namespace Emby.Server.Implementations.IO
                 return;
             }
 
+            var generation = Volatile.Read(ref _watcherGeneration);
+
             // Creating a FileSystemWatcher over the LAN can take hundreds of milliseconds, so wrap it in a Task to do them all in parallel
             Task.Run(() =>
             {
@@ -253,7 +270,11 @@ namespace Emby.Server.Implementations.IO
                     newWatcher.Changed += OnWatcherChanged;
                     newWatcher.Error += OnWatcherError;
 
-                    if (_fileSystemWatchers.TryAdd(path, newWatcher))
+                    if (_disposed || Volatile.Read(ref _watcherGeneration) != generation)
+                    {
+                        DisposeWatcher(newWatcher, false);
+                    }
+                    else if (_fileSystemWatchers.TryAdd(path, newWatcher))
                     {
                         newWatcher.EnableRaisingEvents = true;
                         _logger.LogInformation("Watching directory {Path}", path);
@@ -306,18 +327,9 @@ namespace Emby.Server.Implementations.IO
             {
                 if (removeFromList)
                 {
-                    RemoveWatcherFromList(watcher);
+                    _fileSystemWatchers.TryRemove(watcher.Path, out _);
                 }
             }
-        }
-
-        /// <summary>
-        /// Removes the watcher from list.
-        /// </summary>
-        /// <param name="watcher">The watcher.</param>
-        private void RemoveWatcherFromList(FileSystemWatcher watcher)
-        {
-            _fileSystemWatchers.TryRemove(watcher.Path, out _);
         }
 
         /// <summary>
@@ -329,6 +341,12 @@ namespace Emby.Server.Implementations.IO
         {
             var ex = e.GetException();
             var dw = (FileSystemWatcher)sender;
+
+            if (ex is UnauthorizedAccessException unauthorizedAccessException)
+            {
+                _logger.LogError(unauthorizedAccessException, "Permission error for Directory watcher: {Path}", dw.Path);
+                return;
+            }
 
             _logger.LogError(ex, "Error in Directory watcher for: {Path}", dw.Path);
 
@@ -352,14 +370,28 @@ namespace Emby.Server.Implementations.IO
             }
         }
 
+        /// <inheritdoc />
         public void ReportFileSystemChanged(string path)
         {
             ArgumentException.ThrowIfNullOrEmpty(path);
+
+            if (_disposed)
+            {
+                return;
+            }
 
             if (IgnorePatterns.ShouldIgnore(path))
             {
                 return;
             }
+
+            var fileInfo = _fileSystem.GetFileSystemInfo(path);
+            if (_dotIgnoreIgnoreRule.ShouldIgnore(fileInfo, null))
+            {
+                return;
+            }
+
+            _directoryService.Invalidate(path);
 
             // Ignore certain files, If the parent of an ignored path has a change event, ignore that too
             foreach (var i in _tempIgnoredPaths.Keys)
@@ -443,6 +475,8 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         public void Stop()
         {
+            Interlocked.Increment(ref _watcherGeneration);
+
             _libraryManager.ItemAdded -= OnLibraryManagerItemAdded;
             _libraryManager.ItemRemoved -= OnLibraryManagerItemRemoved;
 
@@ -479,32 +513,17 @@ namespace Emby.Server.Implementations.IO
             }
         }
 
-        /// <summary>
-        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
-        /// </summary>
+        /// <inheritdoc />
         public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
-
-        /// <summary>
-        /// Releases unmanaged and - optionally - managed resources.
-        /// </summary>
-        /// <param name="disposing"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged resources.</param>
-        protected virtual void Dispose(bool disposing)
         {
             if (_disposed)
             {
                 return;
             }
 
-            if (disposing)
-            {
-                Stop();
-            }
-
+            // Set before stopping so anything racing us stops handing out new work.
             _disposed = true;
+            Stop();
         }
     }
 }

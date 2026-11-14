@@ -6,8 +6,8 @@ namespace Jellyfin.Extensions.Tests
     public class StringExtensionsTests
     {
         [Theory]
-        [InlineData("", "")] // Identity edge-case (no diactritics)
-        [InlineData("Indiana Jones", "Indiana Jones")] // Identity (no diactritics)
+        [InlineData("", "")] // Identity edge-case (no diacritics)
+        [InlineData("Indiana Jones", "Indiana Jones")] // Identity (no diacritics)
         [InlineData("a\ud800b", "ab")] // Invalid UTF-16 char stripping
         [InlineData("åäö", "aao")] // Issue #7484
         [InlineData("Jön", "Jon")] // Issue #7484
@@ -25,8 +25,8 @@ namespace Jellyfin.Extensions.Tests
         }
 
         [Theory]
-        [InlineData("", false)] // Identity edge-case (no diactritics)
-        [InlineData("Indiana Jones", false)] // Identity (no diactritics)
+        [InlineData("", false)] // Identity edge-case (no diacritics)
+        [InlineData("Indiana Jones", false)] // Identity (no diacritics)
         [InlineData("a\ud800b", true)] // Invalid UTF-16 char stripping
         [InlineData("åäö", true)] // Issue #7484
         [InlineData("Jön", true)] // Issue #7484
@@ -74,6 +74,29 @@ namespace Jellyfin.Extensions.Tests
         {
             var result = str.AsSpan().RightPart(needle).ToString();
             Assert.Equal(expectedResult, result);
+        }
+
+        [Theory]
+        [InlineData("", "")]
+        [InlineData("/media/movies/Film.mkv", "/media/movies/Film.mkv")]
+        [InlineData(@"C:\media\movies\Film.mkv", @"C:\media\movies\Film.mkv")]
+        [InlineData(@"/media/a""b.mkv", @"/media/a\""b.mkv")]
+        [InlineData(@"/media/a\""b.mkv", @"/media/a\\\""b.mkv")]
+        [InlineData(@"/media/a\\""b.mkv", @"/media/a\\\\\""b.mkv")]
+        [InlineData(@"/media/a\b""c.mkv", @"/media/a\b\""c.mkv")]
+        [InlineData(@"/media/trailing\", @"/media/trailing\\")]
+        [InlineData(@"/media/evil\"" -f lavfi -i sine .mkv", @"/media/evil\\\"" -f lavfi -i sine .mkv")]
+        public void EscapeProcessArgument_ValidInput_Corrects(string input, string expectedResult)
+        {
+            Assert.Equal(expectedResult, input.EscapeProcessArgument());
+        }
+
+        [Theory]
+        [InlineData("/media/movies/Film with spaces.mkv")]
+        [InlineData(@"C:\media\movies\Film.mkv")]
+        public void EscapeProcessArgument_NothingToEscape_ReturnsSameInstance(string input)
+        {
+            Assert.Same(input, input.EscapeProcessArgument());
         }
     }
 }

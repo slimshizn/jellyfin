@@ -24,7 +24,7 @@ namespace MediaBrowser.MediaEncoding.Probing
 
             if (result.Streams is not null)
             {
-                // Convert all dictionaries to case insensitive
+                // Convert all dictionaries to case-insensitive
                 foreach (var stream in result.Streams)
                 {
                     if (stream.Tags is not null)
@@ -70,13 +70,19 @@ namespace MediaBrowser.MediaEncoding.Probing
         }
 
         /// <summary>
-        /// Converts a dictionary to case insensitive.
+        /// Converts a dictionary to case-insensitive.
         /// </summary>
         /// <param name="dict">The dict.</param>
         /// <returns>Dictionary{System.StringSystem.String}.</returns>
-        private static Dictionary<string, string> ConvertDictionaryToCaseInsensitive(IReadOnlyDictionary<string, string> dict)
+        private static Dictionary<string, string?> ConvertDictionaryToCaseInsensitive(IReadOnlyDictionary<string, string?> dict)
         {
-            return new Dictionary<string, string>(dict, StringComparer.OrdinalIgnoreCase);
+            var result = new Dictionary<string, string?>(dict.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, value) in dict)
+            {
+                result.TryAdd(key, value);
+            }
+
+            return result;
         }
     }
 }

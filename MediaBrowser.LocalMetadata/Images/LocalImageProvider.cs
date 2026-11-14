@@ -32,7 +32,9 @@ namespace MediaBrowser.LocalMetadata.Images
             "folder",
             "poster",
             "cover",
-            "default"
+            "jacket",
+            "default",
+            "albumart"
         };
 
         private static readonly string[] _personImageFileNames =
@@ -82,7 +84,7 @@ namespace MediaBrowser.LocalMetadata.Images
             if (item.SupportsLocalMetadata)
             {
                 // Episode has its own provider
-                if (item is Episode || item is Audio || item is Photo)
+                if (item is Episode || (item is Audio && item is not AudioBook) || item is Photo)
                 {
                     return false;
                 }
@@ -319,7 +321,7 @@ namespace MediaBrowser.LocalMetadata.Images
                 {
                     AddImage(files, images, name + "-fanart", ImageType.Backdrop, imagePrefix);
 
-                    // Support without the prefix if it's in it's own folder
+                    // Support without the prefix if it's in its own folder
                     if (!isInMixedFolder)
                     {
                         AddImage(files, images, name + "-fanart", ImageType.Backdrop);

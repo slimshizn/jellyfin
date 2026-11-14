@@ -1,5 +1,6 @@
 using System.IO;
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
@@ -13,7 +14,7 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
     public sealed class DashboardControllerTests : IClassFixture<JellyfinApplicationFactory>
     {
         private readonly JellyfinApplicationFactory _factory;
-        private readonly JsonSerializerOptions _jsonOpions = JsonDefaults.Options;
+        private readonly JsonSerializerOptions _jsonOptions = JsonDefaults.Options;
         private static string? _accessToken;
 
         public DashboardControllerTests(JellyfinApplicationFactory factory)
@@ -26,7 +27,7 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
         {
             var client = _factory.CreateClient();
 
-            var response = await client.GetAsync("web/ConfigurationPage?name=ThisPageDoesntExists");
+            var response = await client.GetAsync("web/ConfigurationPage?name=ThisPageDoesntExists", TestContext.Current.CancellationToken);
 
             Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         }
@@ -36,12 +37,12 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
         {
             var client = _factory.CreateClient();
 
-            var response = await client.GetAsync("/web/ConfigurationPage?name=TestPlugin");
+            var response = await client.GetAsync("/web/ConfigurationPage?name=TestPlugin", TestContext.Current.CancellationToken);
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.Equal(MediaTypeNames.Text.Html, response.Content.Headers.ContentType?.MediaType);
             StreamReader reader = new StreamReader(typeof(TestPlugin).Assembly.GetManifestResourceStream("Jellyfin.Server.Integration.Tests.TestPage.html")!);
-            Assert.Equal(await response.Content.ReadAsStringAsync(), await reader.ReadToEndAsync());
+            Assert.Equal(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken), await reader.ReadToEndAsync(TestContext.Current.CancellationToken));
         }
 
         [Fact]
@@ -49,7 +50,7 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
         {
             var client = _factory.CreateClient();
 
-            var response = await client.GetAsync("/web/ConfigurationPage?name=BrokenPage");
+            var response = await client.GetAsync("/web/ConfigurationPage?name=BrokenPage", TestContext.Current.CancellationToken);
 
             Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         }
@@ -60,12 +61,11 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
             var client = _factory.CreateClient();
             client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
 
-            var response = await client.GetAsync("/web/ConfigurationPages");
+            var response = await client.GetAsync("/web/ConfigurationPages", TestContext.Current.CancellationToken);
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-            var res = await response.Content.ReadAsStreamAsync();
-            _ = await JsonSerializer.DeserializeAsync<ConfigurationPageInfo[]>(res, _jsonOpions);
+            _ = await response.Content.ReadFromJsonAsync<ConfigurationPageInfo[]>(_jsonOptions, TestContext.Current.CancellationToken);
             // TODO: check content
         }
 
@@ -75,14 +75,13 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
             var client = _factory.CreateClient();
             client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
 
-            var response = await client.GetAsync("/web/ConfigurationPages?enableInMainMenu=true");
+            var response = await client.GetAsync("/web/ConfigurationPages?enableInMainMenu=true", TestContext.Current.CancellationToken);
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.Equal(MediaTypeNames.Application.Json, response.Content.Headers.ContentType?.MediaType);
             Assert.Equal(Encoding.UTF8.BodyName, response.Content.Headers.ContentType?.CharSet);
 
-            var res = await response.Content.ReadAsStreamAsync();
-            var data = await JsonSerializer.DeserializeAsync<ConfigurationPageInfo[]>(res, _jsonOpions);
+            var data = await response.Content.ReadFromJsonAsync<ConfigurationPageInfo[]>(_jsonOptions, TestContext.Current.CancellationToken);
             Assert.NotNull(data);
             Assert.Empty(data);
         }

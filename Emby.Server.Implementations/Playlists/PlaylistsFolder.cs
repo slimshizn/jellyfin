@@ -3,14 +3,16 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Serialization;
-using Jellyfin.Data.Entities;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using MediaBrowser.Common;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Model.Querying;
 
 namespace Emby.Server.Implementations.Playlists
 {
+    [RequiresSourceSerialisation]
     public class PlaylistsFolder : BasePluginFolder
     {
         public PlaylistsFolder()
@@ -25,7 +27,7 @@ namespace Emby.Server.Implementations.Playlists
         public override bool SupportsInheritedParentImages => false;
 
         [JsonIgnore]
-        public override string CollectionType => MediaBrowser.Model.Entities.CollectionType.Playlists;
+        public override CollectionType? CollectionType => Jellyfin.Data.Enums.CollectionType.playlists;
 
         protected override IEnumerable<BaseItem> GetEligibleChildrenForRecursiveChildren(User user)
         {
@@ -41,8 +43,9 @@ namespace Emby.Server.Implementations.Playlists
             }
 
             query.Recursive = true;
-            query.IncludeItemTypes = new[] { BaseItemKind.Playlist };
-            return QueryWithPostFiltering2(query);
+            query.IncludeItemTypes = [BaseItemKind.Playlist];
+
+            return QueryWithPostFiltering(query);
         }
 
         public override string GetClientTypeName()

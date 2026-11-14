@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Emby.Naming.Common;
 using Emby.Naming.ExternalFiles;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dlna;
@@ -118,7 +119,7 @@ namespace MediaBrowser.Providers.MediaInfo
                                 || (mediaStream.Type == MediaStreamType.Subtitle && _type == DlnaProfileType.Subtitle))
                             {
                                 mediaStream.Index = startIndex++;
-                                mediaStream.IsDefault = pathInfo.IsDefault || mediaStream.IsDefault;
+                                mediaStream.IsDefault = pathInfo.IsDefault;
                                 mediaStream.IsForced = pathInfo.IsForced || mediaStream.IsForced;
                                 mediaStream.IsHearingImpaired = pathInfo.IsHearingImpaired || mediaStream.IsHearingImpaired;
 
@@ -148,7 +149,49 @@ namespace MediaBrowser.Providers.MediaInfo
                 }
             }
 
-            return mediaStreams.AsReadOnly();
+            return mediaStreams;
+        }
+
+        /// <summary>
+        /// Retrieves the external streams for the provided audio.
+        /// </summary>
+        /// <param name="audio">The <see cref="Audio"/> object to search external streams for.</param>
+        /// <param name="startIndex">The stream index to start adding external streams at.</param>
+        /// <param name="directoryService">The directory service to search for files.</param>
+        /// <param name="clearCache">True if the directory service cache should be cleared before searching.</param>
+        /// <returns>The external streams located.</returns>
+        public IReadOnlyList<MediaStream> GetExternalStreams(
+            Audio audio,
+            int startIndex,
+            IDirectoryService directoryService,
+            bool clearCache)
+        {
+            if (!audio.IsFileProtocol)
+            {
+                return Array.Empty<MediaStream>();
+            }
+
+            var pathInfos = GetExternalFiles(audio, directoryService, clearCache);
+
+            if (pathInfos.Count == 0)
+            {
+                return Array.Empty<MediaStream>();
+            }
+
+            var mediaStreams = new MediaStream[pathInfos.Count];
+
+            for (var i = 0; i < pathInfos.Count; i++)
+            {
+                mediaStreams[i] = new MediaStream
+                {
+                    Type = MediaStreamType.Lyric,
+                    Path = pathInfos[i].Path,
+                    Language = pathInfos[i].Language,
+                    Index = startIndex++
+                };
+            }
+
+            return mediaStreams;
         }
 
         /// <summary>
@@ -175,21 +218,91 @@ namespace MediaBrowser.Providers.MediaInfo
                 return Array.Empty<ExternalPathParserResult>();
             }
 
-            var files = directoryService.GetFilePaths(folder, clearCache, true).ToList();
+            var files = directoryService.GetFilePaths(folder, clearCache).ToList();
             files.Remove(video.Path);
             var internalMetadataPath = video.GetInternalMetadataPath();
             if (_fileSystem.DirectoryExists(internalMetadataPath))
             {
-                files.AddRange(directoryService.GetFilePaths(internalMetadataPath, clearCache, true));
+                files.AddRange(directoryService.GetFilePaths(internalMetadataPath, clearCache));
             }
 
-            if (!files.Any())
+            if (files.Count == 0)
+            {
+                return Array.Empty<ExternalPathParserResult>();
+            }
+
+            // VobSub .sub payloads only carry per-track language metadata when read via
+            // their paired .idx file, so probe the .idx instead and skip the .sub. Pairing
+            // requires the same directory (ffprobe can't resolve a split pair) and an
+            // ordinal comparison (ffprobe matches the .sub by exact case on case-sensitive
+            // filesystems, so a looser match could suppress a .sub with no working .idx).
+            // An .idx file with no paired .sub cannot be probed at all, so it is left out
+            // entirely rather than surfaced (which would otherwise fail every probe and,
+            // since the .idx would keep "existing" from Jellyfin's point of view, prevent
+            // stale subtitle stream metadata from ever being cleared once the .sub is gone).
+            HashSet<string>? pairedVobSubKeys = _type == DlnaProfileType.Subtitle
+                ? GetPairedVobSubKeys(files)
+                : null;
+
+            var externalPathInfos = new List<ExternalPathParserResult>();
+            ReadOnlySpan<char> prefix = video.FileNameWithoutExtension;
+            foreach (var file in files)
+            {
+                if (IsSuppressedVobSubFile(file, pairedVobSubKeys))
+                {
+                    continue;
+                }
+
+                var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(file.AsSpan());
+                if (fileNameWithoutExtension.Length >= prefix.Length
+                    && prefix.Equals(fileNameWithoutExtension[..prefix.Length], StringComparison.OrdinalIgnoreCase)
+                    && (fileNameWithoutExtension.Length == prefix.Length || _namingOptions.MediaFlagDelimiters.Contains(fileNameWithoutExtension[prefix.Length])))
+                {
+                    var externalPathInfo = _externalPathParser.ParseFile(file, fileNameWithoutExtension[prefix.Length..].ToString());
+
+                    if (externalPathInfo is not null)
+                    {
+                        externalPathInfos.Add(externalPathInfo);
+                    }
+                }
+            }
+
+            return externalPathInfos;
+        }
+
+        /// <summary>
+        /// Returns the external file infos for the given audio.
+        /// </summary>
+        /// <param name="audio">The <see cref="Audio"/> object to search external files for.</param>
+        /// <param name="directoryService">The directory service to search for files.</param>
+        /// <param name="clearCache">True if the directory service cache should be cleared before searching.</param>
+        /// <returns>The external file paths located.</returns>
+        public IReadOnlyList<ExternalPathParserResult> GetExternalFiles(
+            Audio audio,
+            IDirectoryService directoryService,
+            bool clearCache)
+        {
+            if (!audio.IsFileProtocol)
+            {
+                return Array.Empty<ExternalPathParserResult>();
+            }
+
+            string folder = audio.ContainingFolderPath;
+            var files = directoryService.GetFilePaths(folder, clearCache).ToList();
+            files.Remove(audio.Path);
+            var internalMetadataPath = audio.GetInternalMetadataPath();
+            if (_fileSystem.DirectoryExists(internalMetadataPath))
+            {
+                files.AddRange(directoryService.GetFilePaths(internalMetadataPath, clearCache));
+            }
+
+            if (files.Count == 0)
             {
                 return Array.Empty<ExternalPathParserResult>();
             }
 
             var externalPathInfos = new List<ExternalPathParserResult>();
-            ReadOnlySpan<char> prefix = video.FileNameWithoutExtension;
+            ReadOnlySpan<char> prefix = audio.FileNameWithoutExtension;
             foreach (var file in files)
             {
                 var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(file.AsSpan());
@@ -207,6 +320,77 @@ namespace MediaBrowser.Providers.MediaInfo
             }
 
             return externalPathInfos;
+        }
+
+        /// <summary>
+        /// Determines whether a candidate file is part of a VobSub .idx/.sub pair that
+        /// should be resolved to only its .idx file, or an .idx file with no paired .sub
+        /// that cannot be probed at all.
+        /// </summary>
+        /// <param name="file">The full path to the candidate file.</param>
+        /// <param name="pairedVobSubKeys">The set of pairing keys with both an .idx and .sub present, or null if not applicable.</param>
+        /// <returns><c>true</c> if the file should be suppressed; otherwise, <c>false</c>.</returns>
+        private static bool IsSuppressedVobSubFile(string file, HashSet<string>? pairedVobSubKeys)
+        {
+            if (pairedVobSubKeys is null)
+            {
+                return false;
+            }
+
+            var extension = Path.GetExtension(file.AsSpan());
+            if (extension.Equals(".sub", StringComparison.OrdinalIgnoreCase))
+            {
+                // A paired .idx exists; probe it instead of the .sub payload.
+                return pairedVobSubKeys.Contains(GetVobSubPairingKey(file));
+            }
+
+            if (extension.Equals(".idx", StringComparison.OrdinalIgnoreCase))
+            {
+                // Without its .sub payload, the .idx cannot be probed for any data.
+                return !pairedVobSubKeys.Contains(GetVobSubPairingKey(file));
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Builds the set of directory+basename keys that have both an .idx and a .sub
+        /// file present, in a single pass over the candidate files.
+        /// </summary>
+        /// <param name="files">The candidate files to search.</param>
+        /// <returns>The set of pairing keys with both an .idx and .sub present.</returns>
+        private static HashSet<string> GetPairedVobSubKeys(IEnumerable<string> files)
+        {
+            var idxKeys = new HashSet<string>(StringComparer.Ordinal);
+            var subKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var file in files)
+            {
+                var extension = Path.GetExtension(file.AsSpan());
+                if (extension.Equals(".idx", StringComparison.OrdinalIgnoreCase))
+                {
+                    idxKeys.Add(GetVobSubPairingKey(file));
+                }
+                else if (extension.Equals(".sub", StringComparison.OrdinalIgnoreCase))
+                {
+                    subKeys.Add(GetVobSubPairingKey(file));
+                }
+            }
+
+            idxKeys.IntersectWith(subKeys);
+            return idxKeys;
+        }
+
+        /// <summary>
+        /// Builds a directory+basename key used to pair a VobSub .idx file with its .sub
+        /// payload only when both live in the same directory.
+        /// </summary>
+        /// <param name="file">The full path to the file.</param>
+        /// <returns>A key combining the containing directory and file name without extension.</returns>
+        private static string GetVobSubPairingKey(string file)
+        {
+            var directory = Path.GetDirectoryName(file) ?? string.Empty;
+            var baseName = Path.GetFileNameWithoutExtension(file);
+            return Path.Combine(directory, baseName);
         }
 
         /// <summary>

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net.Mime;
 using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Models;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Net;
 using MediaBrowser.Model.Plugins;
@@ -19,6 +20,7 @@ namespace Jellyfin.Api.Controllers;
 /// The dashboard controller.
 /// </summary>
 [Route("")]
+[Tags("Plugin")]
 public class DashboardController : BaseJellyfinApiController
 {
     private readonly ILogger<DashboardController> _logger;
@@ -45,9 +47,9 @@ public class DashboardController : BaseJellyfinApiController
     /// <response code="404">Server still loading.</response>
     /// <returns>An <see cref="IEnumerable{ConfigurationPageInfo}"/> with infos about the plugins.</returns>
     [HttpGet("web/ConfigurationPages")]
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [Authorize]
     public ActionResult<IEnumerable<ConfigurationPageInfo>> GetConfigurationPages(
         [FromQuery] bool? enableInMainMenu)
     {

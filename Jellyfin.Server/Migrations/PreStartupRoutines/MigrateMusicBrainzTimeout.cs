@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Serialization;
 using Emby.Server.Implementations;
@@ -9,7 +11,8 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Server.Migrations.PreStartupRoutines;
 
 /// <inheritdoc />
-public class MigrateMusicBrainzTimeout : IMigrationRoutine
+[JellyfinMigration("2025-04-20T02:00:00", nameof(MigrateMusicBrainzTimeout), "A6DCACF4-C057-4Ef9-80D3-61CEF9DDB4F0", Stage = Stages.JellyfinMigrationStageTypes.PreInitialisation)]
+public class MigrateMusicBrainzTimeout : IAsyncMigrationRoutine
 {
     private readonly ServerApplicationPaths _applicationPaths;
     private readonly ILogger<MigrateMusicBrainzTimeout> _logger;
@@ -26,35 +29,30 @@ public class MigrateMusicBrainzTimeout : IMigrationRoutine
     }
 
     /// <inheritdoc />
-    public Guid Id => Guid.Parse("A6DCACF4-C057-4Ef9-80D3-61CEF9DDB4F0");
-
-    /// <inheritdoc />
-    public string Name => nameof(MigrateMusicBrainzTimeout);
-
-    /// <inheritdoc />
-    public bool PerformOnNewInstall => false;
-
-    /// <inheritdoc />
-    public void Perform()
+    public Task PerformAsync(CancellationToken cancellationToken)
     {
         string path = Path.Combine(_applicationPaths.PluginConfigurationsPath, "Jellyfin.Plugin.MusicBrainz.xml");
         if (!File.Exists(path))
         {
             _logger.LogDebug("No MusicBrainz plugin configuration file found, skipping");
-            return;
+            return Task.CompletedTask;
         }
 
         var oldPluginConfiguration = ReadOld(path);
 
         if (oldPluginConfiguration is not null)
         {
-            var newPluginConfiguration = new PluginConfiguration();
-            newPluginConfiguration.Server = oldPluginConfiguration.Server;
-            newPluginConfiguration.ReplaceArtistName = oldPluginConfiguration.ReplaceArtistName;
+            var newPluginConfiguration = new PluginConfiguration
+            {
+                Server = oldPluginConfiguration.Server,
+                ReplaceArtistName = oldPluginConfiguration.ReplaceArtistName
+            };
             var newRateLimit = oldPluginConfiguration.RateLimit / 1000.0;
             newPluginConfiguration.RateLimit = newRateLimit < 1.0 ? 1.0 : newRateLimit;
             WriteNew(path, newPluginConfiguration);
         }
+
+        return Task.CompletedTask;
     }
 
     private OldMusicBrainzConfiguration? ReadOld(string path)
@@ -93,6 +91,4 @@ public class MigrateMusicBrainzTimeout : IMigrationRoutine
 
         public bool ReplaceArtistName { get; set; }
     }
-#pragma warning restore
-
 }

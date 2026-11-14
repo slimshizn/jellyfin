@@ -6,13 +6,15 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Mime;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Attributes;
-using Jellyfin.Api.Constants;
 using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Helpers;
 using Jellyfin.Api.Models.SubtitleDtos;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -46,6 +48,12 @@ public class SubtitleController : BaseJellyfinApiController
     private readonly IProviderManager _providerManager;
     private readonly IFileSystem _fileSystem;
     private readonly ILogger<SubtitleController> _logger;
+
+    /// <summary>
+    /// The default MPEGTS value used in the WebVTT X-TIMESTAMP-MAP header, matching the legacy MPEG-TS
+    /// segment container's 10 second PTS offset.
+    /// </summary>
+    internal const long DefaultVttTimestampMapMpegts = 900000;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SubtitleController"/> class.
@@ -94,8 +102,7 @@ public class SubtitleController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId,
         [FromRoute, Required] int index)
     {
-        var item = _libraryManager.GetItemById(itemId);
-
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, User.GetUserId());
         if (item is null)
         {
             return NotFound();
@@ -112,18 +119,24 @@ public class SubtitleController : BaseJellyfinApiController
     /// <param name="language">The language of the subtitles.</param>
     /// <param name="isPerfectMatch">Optional. Only show subtitles which are a perfect match.</param>
     /// <response code="200">Subtitles retrieved.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>An array of <see cref="RemoteSubtitleInfo"/>.</returns>
     [HttpGet("Items/{itemId}/RemoteSearch/Subtitles/{language}")]
-    [Authorize]
+    [Authorize(Policy = Policies.SubtitleManagement)]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<IEnumerable<RemoteSubtitleInfo>>> SearchRemoteSubtitles(
         [FromRoute, Required] Guid itemId,
         [FromRoute, Required] string language,
         [FromQuery] bool? isPerfectMatch)
     {
-        var video = (Video)_libraryManager.GetItemById(itemId);
+        var item = _libraryManager.GetItemById<Video>(itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
 
-        return await _subtitleManager.SearchSubtitles(video, language, isPerfectMatch, false, CancellationToken.None).ConfigureAwait(false);
+        return await _subtitleManager.SearchSubtitles(item, language, isPerfectMatch, false, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -132,22 +145,28 @@ public class SubtitleController : BaseJellyfinApiController
     /// <param name="itemId">The item id.</param>
     /// <param name="subtitleId">The subtitle id.</param>
     /// <response code="204">Subtitle downloaded.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpPost("Items/{itemId}/RemoteSearch/Subtitles/{subtitleId}")]
-    [Authorize]
+    [Authorize(Policy = Policies.SubtitleManagement)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult> DownloadRemoteSubtitles(
         [FromRoute, Required] Guid itemId,
         [FromRoute, Required] string subtitleId)
     {
-        var video = (Video)_libraryManager.GetItemById(itemId);
+        var item = _libraryManager.GetItemById<Video>(itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
 
         try
         {
-            await _subtitleManager.DownloadSubtitles(video, subtitleId, CancellationToken.None)
+            await _subtitleManager.DownloadSubtitles(item, subtitleId, CancellationToken.None)
                 .ConfigureAwait(false);
 
-            _providerManager.QueueRefresh(video.Id, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), RefreshPriority.High);
+            _providerManager.QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), RefreshPriority.High);
         }
         catch (Exception ex)
         {
@@ -160,17 +179,17 @@ public class SubtitleController : BaseJellyfinApiController
     /// <summary>
     /// Gets the remote subtitles.
     /// </summary>
-    /// <param name="id">The item id.</param>
+    /// <param name="subtitleId">The item id.</param>
     /// <response code="200">File returned.</response>
     /// <returns>A <see cref="FileStreamResult"/> with the subtitle file.</returns>
-    [HttpGet("Providers/Subtitles/Subtitles/{id}")]
-    [Authorize]
+    [HttpGet("Providers/Subtitles/Subtitles/{subtitleId}")]
+    [Authorize(Policy = Policies.SubtitleManagement)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Produces(MediaTypeNames.Application.Octet)]
     [ProducesFile("text/*")]
-    public async Task<ActionResult> GetRemoteSubtitles([FromRoute, Required] string id)
+    public async Task<ActionResult> GetRemoteSubtitles([FromRoute, Required] string subtitleId)
     {
-        var result = await _subtitleManager.GetRemoteSubtitles(id, CancellationToken.None).ConfigureAwait(false);
+        var result = await _subtitleManager.GetRemoteSubtitles(subtitleId, CancellationToken.None).ConfigureAwait(false);
 
         return File(result.Stream, MimeTypes.GetMimeType("file." + result.Format));
     }
@@ -189,6 +208,7 @@ public class SubtitleController : BaseJellyfinApiController
     /// <param name="endPositionTicks">Optional. The end position of the subtitle in ticks.</param>
     /// <param name="copyTimestamps">Optional. Whether to copy the timestamps.</param>
     /// <param name="addVttTimeMap">Optional. Whether to add a VTT time map.</param>
+    /// <param name="vttTimestampMapMpegts">Optional. The VTT timestamp map MPEGTS value.</param>
     /// <param name="startPositionTicks">The start position of the subtitle in ticks.</param>
     /// <response code="200">File returned.</response>
     /// <returns>A <see cref="FileContentResult"/> with the subtitle file.</returns>
@@ -207,6 +227,7 @@ public class SubtitleController : BaseJellyfinApiController
         [FromQuery] long? endPositionTicks,
         [FromQuery] bool copyTimestamps = false,
         [FromQuery] bool addVttTimeMap = false,
+        [FromQuery] long vttTimestampMapMpegts = DefaultVttTimestampMapMpegts,
         [FromQuery] long startPositionTicks = 0)
     {
         // Set parameters to route value if not provided via query.
@@ -220,18 +241,17 @@ public class SubtitleController : BaseJellyfinApiController
             format = "json";
         }
 
-        if (string.IsNullOrEmpty(format))
+        // Graphical subtitles cannot be parsed or rewritten, so they are always delivered as the raw
+        // stream for the client to render. Serve them straight from disk instead of piping them
+        // through the encoder, so that range requests keep working: clients fetch these tracks
+        // incrementally while rendering them, and they are far too large to hand over in one piece.
+        if (MediaStream.IsPgsFormat(format) || MediaStream.IsVobSubFormat(format))
         {
-            var item = (Video)_libraryManager.GetItemById(itemId.Value);
-
-            var idString = itemId.Value.ToString("N", CultureInfo.InvariantCulture);
-            var mediaSource = _mediaSourceManager.GetStaticMediaSources(item, false)
-                .First(i => string.Equals(i.Id, mediaSourceId ?? idString, StringComparison.Ordinal));
-
-            var subtitleStream = mediaSource.MediaStreams
-                .First(i => i.Type == MediaStreamType.Subtitle && i.Index == index);
-
-            return PhysicalFile(subtitleStream.Path, MimeTypes.GetMimeType(subtitleStream.Path));
+            var subtitlePath = await GetGraphicalSubtitlePath(itemId.Value, mediaSourceId, index.Value).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(subtitlePath))
+            {
+                return PhysicalFile(subtitlePath, MimeTypes.GetMimeType(subtitlePath), true);
+            }
         }
 
         if (string.Equals(format, "vtt", StringComparison.OrdinalIgnoreCase) && addVttTimeMap)
@@ -243,7 +263,7 @@ public class SubtitleController : BaseJellyfinApiController
 
                 var text = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-                text = text.Replace("WEBVTT", "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000", StringComparison.Ordinal);
+                text = text.Replace("WEBVTT", "WEBVTT\n" + GetVttTimestampMap(vttTimestampMapMpegts), StringComparison.Ordinal);
 
                 return File(Encoding.UTF8.GetBytes(text), MimeTypes.GetMimeType("file." + format));
             }
@@ -277,6 +297,7 @@ public class SubtitleController : BaseJellyfinApiController
     /// <param name="endPositionTicks">Optional. The end position of the subtitle in ticks.</param>
     /// <param name="copyTimestamps">Optional. Whether to copy the timestamps.</param>
     /// <param name="addVttTimeMap">Optional. Whether to add a VTT time map.</param>
+    /// <param name="vttTimestampMapMpegts">Optional. The VTT timestamp map MPEGTS value.</param>
     /// <response code="200">File returned.</response>
     /// <returns>A <see cref="FileContentResult"/> with the subtitle file.</returns>
     [HttpGet("Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeStartPositionTicks}/Stream.{routeFormat}")]
@@ -295,7 +316,8 @@ public class SubtitleController : BaseJellyfinApiController
         [FromQuery, ParameterObsolete] string? format,
         [FromQuery] long? endPositionTicks,
         [FromQuery] bool copyTimestamps = false,
-        [FromQuery] bool addVttTimeMap = false)
+        [FromQuery] bool addVttTimeMap = false,
+        [FromQuery] long vttTimestampMapMpegts = DefaultVttTimestampMapMpegts)
     {
         return GetSubtitle(
             routeItemId,
@@ -309,6 +331,7 @@ public class SubtitleController : BaseJellyfinApiController
             endPositionTicks,
             copyTimestamps,
             addVttTimeMap,
+            vttTimestampMapMpegts,
             startPositionTicks ?? routeStartPositionTicks);
     }
 
@@ -319,20 +342,28 @@ public class SubtitleController : BaseJellyfinApiController
     /// <param name="index">The subtitle stream index.</param>
     /// <param name="mediaSourceId">The media source id.</param>
     /// <param name="segmentLength">The subtitle segment length.</param>
+    /// <param name="vttTimestampMapMpegts">Optional. The VTT timestamp map MPEGTS value.</param>
     /// <response code="200">Subtitle playlist retrieved.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>A <see cref="FileContentResult"/> with the HLS subtitle playlist.</returns>
     [HttpGet("Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/subtitles.m3u8")]
     [Authorize]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesPlaylistFile]
     [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "index", Justification = "Imported from ServiceStack")]
     public async Task<ActionResult> GetSubtitlePlaylist(
         [FromRoute, Required] Guid itemId,
         [FromRoute, Required] int index,
         [FromRoute, Required] string mediaSourceId,
-        [FromQuery, Required] int segmentLength)
+        [FromQuery, Required] int segmentLength,
+        [FromQuery] long vttTimestampMapMpegts = DefaultVttTimestampMapMpegts)
     {
-        var item = (Video)_libraryManager.GetItemById(itemId);
+        var item = _libraryManager.GetItemById<Video>(itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
 
         var mediaSource = await _mediaSourceManager.GetMediaSource(item, mediaSourceId, null, false, CancellationToken.None).ConfigureAwait(false);
 
@@ -374,12 +405,7 @@ public class SubtitleController : BaseJellyfinApiController
 
             var endPositionTicks = Math.Min(runtime, positionTicks + segmentLengthTicks);
 
-            var url = string.Format(
-                CultureInfo.InvariantCulture,
-                "stream.vtt?CopyTimestamps=true&AddVttTimeMap=true&StartPositionTicks={0}&EndPositionTicks={1}&api_key={2}",
-                positionTicks.ToString(CultureInfo.InvariantCulture),
-                endPositionTicks.ToString(CultureInfo.InvariantCulture),
-                accessToken);
+            var url = GetSubtitleSegmentUrl(positionTicks, endPositionTicks, accessToken, vttTimestampMapMpegts);
 
             builder.AppendLine(url);
 
@@ -391,38 +417,122 @@ public class SubtitleController : BaseJellyfinApiController
     }
 
     /// <summary>
+    /// Builds the WebVTT X-TIMESTAMP-MAP header for the given MPEGTS offset.
+    /// </summary>
+    /// <param name="mpegTimestamp">The MPEGTS offset to embed.</param>
+    /// <returns>The X-TIMESTAMP-MAP header line.</returns>
+    internal static string GetVttTimestampMap(long mpegTimestamp)
+    {
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "X-TIMESTAMP-MAP=MPEGTS:{0},LOCAL:00:00:00.000",
+            mpegTimestamp);
+    }
+
+    /// <summary>
+    /// Builds the relative URL for a single WebVTT subtitle segment referenced from a subtitle HLS playlist.
+    /// </summary>
+    /// <param name="positionTicks">The segment start position, in ticks.</param>
+    /// <param name="endPositionTicks">The segment end position, in ticks.</param>
+    /// <param name="accessToken">The access token to include on the segment request.</param>
+    /// <param name="vttTimestampMapMpegts">The MPEGTS offset to request for this segment.</param>
+    /// <returns>The relative stream.vtt segment URL.</returns>
+    internal static string GetSubtitleSegmentUrl(long positionTicks, long endPositionTicks, string? accessToken, long vttTimestampMapMpegts)
+    {
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "stream.vtt?CopyTimestamps=true&AddVttTimeMap=true&StartPositionTicks={0}&EndPositionTicks={1}&ApiKey={2}&VttTimestampMapMpegts={3}",
+            positionTicks.ToString(CultureInfo.InvariantCulture),
+            endPositionTicks.ToString(CultureInfo.InvariantCulture),
+            accessToken,
+            vttTimestampMapMpegts.ToString(CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
     /// Upload an external subtitle file.
     /// </summary>
     /// <param name="itemId">The item the subtitle belongs to.</param>
     /// <param name="body">The request body.</param>
     /// <response code="204">Subtitle uploaded.</response>
+    /// <response code="404">Item not found.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpPost("Videos/{itemId}/Subtitles")]
-    [Authorize(Policy = Policies.RequiresElevation)]
+    [Authorize(Policy = Policies.SubtitleManagement)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult> UploadSubtitle(
         [FromRoute, Required] Guid itemId,
         [FromBody, Required] UploadSubtitleDto body)
     {
-        var video = (Video)_libraryManager.GetItemById(itemId);
-        var data = Convert.FromBase64String(body.Data);
-        var memoryStream = new MemoryStream(data, 0, data.Length, false, true);
+        var item = _libraryManager.GetItemById<Video>(itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(body.Data);
+        var memoryStream = new MemoryStream(bytes, 0, bytes.Length, false, true);
         await using (memoryStream.ConfigureAwait(false))
         {
-            await _subtitleManager.UploadSubtitle(
-                video,
-                new SubtitleResponse
-                {
-                    Format = body.Format,
-                    Language = body.Language,
-                    IsForced = body.IsForced,
-                    IsHearingImpaired = body.IsHearingImpaired,
-                    Stream = memoryStream
-                }).ConfigureAwait(false);
-            _providerManager.QueueRefresh(video.Id, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), RefreshPriority.High);
+            using var transform = new FromBase64Transform();
+            var stream = new CryptoStream(memoryStream, transform, CryptoStreamMode.Read);
+            await using (stream.ConfigureAwait(false))
+            {
+                await _subtitleManager.UploadSubtitle(
+                    item,
+                    new SubtitleResponse
+                    {
+                        Format = body.Format,
+                        Language = body.Language,
+                        IsForced = body.IsForced,
+                        IsHearingImpaired = body.IsHearingImpaired,
+                        Stream = stream
+                    }).ConfigureAwait(false);
+                _providerManager.QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), RefreshPriority.High);
 
-            return NoContent();
+                return NoContent();
+            }
         }
+    }
+
+    private async Task<string?> GetGraphicalSubtitlePath(Guid id, string? mediaSourceId, int index)
+    {
+        var item = _libraryManager.GetItemById<BaseItem>(id);
+        if (item is null)
+        {
+            return null;
+        }
+
+        var idString = id.ToString("N", CultureInfo.InvariantCulture);
+        var mediaSource = _mediaSourceManager.GetStaticMediaSources(item, false)
+            .FirstOrDefault(i => string.Equals(i.Id, mediaSourceId ?? idString, StringComparison.OrdinalIgnoreCase));
+
+        var subtitleStream = mediaSource?.MediaStreams
+            .FirstOrDefault(i => i.Type == MediaStreamType.Subtitle && i.Index == index);
+
+        if (mediaSource is null || subtitleStream is null
+            || !(subtitleStream.IsPgsSubtitleStream || subtitleStream.IsVobSubSubtitleStream))
+        {
+            return null;
+        }
+
+        var path = await _subtitleEncoder.GetSubtitleFilePath(subtitleStream, mediaSource, CancellationToken.None).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(path))
+        {
+            return null;
+        }
+
+        // Only a raw PGS payload or an extracted .mks can be handed over untouched. Anything else the
+        // encoder resolved to (e.g. a VobSub .idx/.sub pair, which it converts) is not a passthrough.
+        var extension = Path.GetExtension(path.AsSpan()).TrimStart('.').ToString();
+        if (!MediaStream.IsPgsFormat(extension)
+            && !string.Equals(extension, "mks", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        // Remotely hosted external subtitles have no local file to serve; those fall back to the encoder.
+        return _fileSystem.FileExists(path) ? path : null;
     }
 
     /// <summary>
@@ -445,7 +555,7 @@ public class SubtitleController : BaseJellyfinApiController
         long? endPositionTicks,
         bool copyTimestamps)
     {
-        var item = _libraryManager.GetItemById(id);
+        var item = _libraryManager.GetItemById<BaseItem>(id);
 
         return _subtitleEncoder.GetSubtitles(
             item,
@@ -526,7 +636,7 @@ public class SubtitleController : BaseJellyfinApiController
         if (!string.IsNullOrEmpty(fallbackFontPath))
         {
             var fontFile = _fileSystem.GetFiles(fallbackFontPath)
-                .First(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase));
+                .FirstOrDefault(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase));
             var fileSize = fontFile?.Length;
 
             if (fontFile is not null && fileSize is not null && fileSize > 0)

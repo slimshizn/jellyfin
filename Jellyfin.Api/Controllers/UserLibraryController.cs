@@ -5,14 +5,16 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
-using Jellyfin.Data.Entities;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -29,15 +31,18 @@ namespace Jellyfin.Api.Controllers;
 /// </summary>
 [Route("")]
 [Authorize]
+[Tags("Library")]
 public class UserLibraryController : BaseJellyfinApiController
 {
+    private static readonly TimeSpan RefreshOnDemandTimeout = TimeSpan.FromSeconds(3);
+
     private readonly IUserManager _userManager;
     private readonly IUserDataManager _userDataRepository;
     private readonly ILibraryManager _libraryManager;
     private readonly IDtoService _dtoService;
     private readonly IUserViewManager _userViewManager;
     private readonly IFileSystem _fileSystem;
-    private readonly ILyricManager _lyricManager;
+    private readonly IProviderManager _providerManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="UserLibraryController"/> class.
@@ -48,7 +53,7 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="userViewManager">Instance of the <see cref="IUserViewManager"/> interface.</param>
     /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
-    /// <param name="lyricManager">Instance of the <see cref="ILyricManager"/> interface.</param>
+    /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
     public UserLibraryController(
         IUserManager userManager,
         IUserDataManager userDataRepository,
@@ -56,7 +61,7 @@ public class UserLibraryController : BaseJellyfinApiController
         IDtoService dtoService,
         IUserViewManager userViewManager,
         IFileSystem fileSystem,
-        ILyricManager lyricManager)
+        IProviderManager providerManager)
     {
         _userManager = userManager;
         _userDataRepository = userDataRepository;
@@ -64,7 +69,42 @@ public class UserLibraryController : BaseJellyfinApiController
         _dtoService = dtoService;
         _userViewManager = userViewManager;
         _fileSystem = fileSystem;
-        _lyricManager = lyricManager;
+        _providerManager = providerManager;
+    }
+
+    /// <summary>
+    /// Gets an item from a user's library.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Item returned.</response>
+    /// <returns>An <see cref="OkResult"/> containing the item.</returns>
+    [HttpGet("Items/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<BaseItemDto>> GetItem(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        var item = itemId.IsEmpty()
+            ? _libraryManager.GetUserRootFolder()
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        await RefreshOnDemandIfNeeded(item).ConfigureAwait(false);
+
+        var dtoOptions = new DtoOptions();
+
+        return _dtoService.GetBaseItemDto(item, dtoOptions, user);
     }
 
     /// <summary>
@@ -76,34 +116,32 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the item.</returns>
     [HttpGet("Users/{userId}/Items/{itemId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<BaseItemDto>> GetItem([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public Task<ActionResult<BaseItemDto>> GetItemLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => GetItem(userId, itemId);
+
+    /// <summary>
+    /// Gets the root folder from a user's library.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <response code="200">Root folder returned.</response>
+    /// <returns>An <see cref="OkResult"/> containing the user's root folder.</returns>
+    [HttpGet("Items/Root")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<BaseItemDto> GetRootFolder([FromQuery] Guid? userId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
-            ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
-        if (item is null)
-        {
-            return NotFound();
-        }
-
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
-
-        await RefreshItemOnDemandIfNeeded(item).ConfigureAwait(false);
-
-        var dtoOptions = new DtoOptions().AddClientFields(User);
-
+        var item = _libraryManager.GetUserRootFolder();
+        var dtoOptions = new DtoOptions();
         return _dtoService.GetBaseItemDto(item, dtoOptions, user);
     }
 
@@ -115,17 +153,45 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the user's root folder.</returns>
     [HttpGet("Users/{userId}/Items/Root")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<BaseItemDto> GetRootFolder([FromRoute, Required] Guid userId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<BaseItemDto> GetRootFolderLegacy(
+        [FromRoute, Required] Guid userId)
+        => GetRootFolder(userId);
+
+    /// <summary>
+    /// Gets intros to play before the main media item plays.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Intros returned.</response>
+    /// <returns>An <see cref="OkResult"/> containing the intros to play.</returns>
+    [HttpGet("Items/{itemId}/Intros")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetIntros(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = _libraryManager.GetUserRootFolder();
-        var dtoOptions = new DtoOptions().AddClientFields(User);
-        return _dtoService.GetBaseItemDto(item, dtoOptions, user);
+        var item = itemId.IsEmpty()
+            ? _libraryManager.GetUserRootFolder()
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var items = await _libraryManager.GetIntros(item, user).ConfigureAwait(false);
+        var dtoOptions = new DtoOptions();
+        var dtos = items.Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user)).ToArray();
+
+        return new QueryResult<BaseItemDto>(dtos);
     }
 
     /// <summary>
@@ -137,35 +203,43 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the intros to play.</returns>
     [HttpGet("Users/{userId}/Items/{itemId}/Intros")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetIntros([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public Task<ActionResult<QueryResult<BaseItemDto>>> GetIntrosLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => GetIntros(userId, itemId);
+
+    /// <summary>
+    /// Marks an item as a favorite.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Item marked as favorite.</response>
+    /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
+    [HttpPost("UserFavoriteItems/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto> MarkFavoriteItem(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
+        var item = itemId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
             return NotFound();
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
-
-        var items = await _libraryManager.GetIntros(item, user).ConfigureAwait(false);
-        var dtoOptions = new DtoOptions().AddClientFields(User);
-        var dtos = items.Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user)).ToArray();
-
-        return new QueryResult<BaseItemDto>(dtos);
+        return MarkFavorite(user, item, true);
     }
 
     /// <summary>
@@ -177,31 +251,43 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
     [HttpPost("Users/{userId}/FavoriteItems/{itemId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<UserItemDataDto> MarkFavoriteItem([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto> MarkFavoriteItemLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => MarkFavoriteItem(userId, itemId);
+
+    /// <summary>
+    /// Unmarks item as a favorite.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Item unmarked as favorite.</response>
+    /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
+    [HttpDelete("UserFavoriteItems/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto> UnmarkFavoriteItem(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
+        var item = itemId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
             return NotFound();
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
-
-        return MarkFavorite(user, item, true);
+        return MarkFavorite(user, item, false);
     }
 
     /// <summary>
@@ -213,31 +299,43 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
     [HttpDelete("Users/{userId}/FavoriteItems/{itemId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<UserItemDataDto> UnmarkFavoriteItem([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto> UnmarkFavoriteItemLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => UnmarkFavoriteItem(userId, itemId);
+
+    /// <summary>
+    /// Deletes a user's saved personal rating for an item.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Personal rating removed.</response>
+    /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
+    [HttpDelete("UserItems/{itemId}/Rating")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto?> DeleteUserItemRating(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
+        var item = itemId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
             return NotFound();
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
-
-        return MarkFavorite(user, item, false);
+        return UpdateUserItemRatingInternal(user, item, null);
     }
 
     /// <summary>
@@ -249,31 +347,45 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
     [HttpDelete("Users/{userId}/Items/{itemId}/Rating")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<UserItemDataDto> DeleteUserItemRating([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto?> DeleteUserItemRatingLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => DeleteUserItemRating(userId, itemId);
+
+    /// <summary>
+    /// Updates a user's rating for an item.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <param name="likes">Whether this <see cref="UpdateUserItemRating" /> is likes.</param>
+    /// <response code="200">Item rating updated.</response>
+    /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
+    [HttpPost("UserItems/{itemId}/Rating")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto?> UpdateUserItemRating(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] bool? likes)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
+        var item = itemId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
             return NotFound();
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
-
-        return UpdateUserItemRatingInternal(user, item, null);
+        return UpdateUserItemRatingInternal(user, item, likes);
     }
 
     /// <summary>
@@ -286,31 +398,46 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the <see cref="UserItemDataDto"/>.</returns>
     [HttpPost("Users/{userId}/Items/{itemId}/Rating")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<UserItemDataDto> UpdateUserItemRating([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId, [FromQuery] bool? likes)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto?> UpdateUserItemRatingLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] bool? likes)
+        => UpdateUserItemRating(userId, itemId, likes);
+
+    /// <summary>
+    /// Gets local trailers for an item.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">An <see cref="OkResult"/> containing the item's local trailers.</response>
+    /// <returns>The items local trailers.</returns>
+    [HttpGet("Items/{itemId}/LocalTrailers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetLocalTrailers(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
+        var item = itemId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
             return NotFound();
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
+        var dtoOptions = new DtoOptions();
 
-        return UpdateUserItemRatingInternal(user, item, likes);
+        return Ok(item.GetExtras([ExtraType.Trailer], user)
+            .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item)));
     }
 
     /// <summary>
@@ -322,39 +449,46 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>The items local trailers.</returns>
     [HttpGet("Users/{userId}/Items/{itemId}/LocalTrailers")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<BaseItemDto>> GetLocalTrailers([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetLocalTrailersLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => GetLocalTrailers(userId, itemId);
+
+    /// <summary>
+    /// Gets special features for an item.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="itemId">Item id.</param>
+    /// <response code="200">Special features returned.</response>
+    /// <returns>An <see cref="OkResult"/> containing the special features.</returns>
+    [HttpGet("Items/{itemId}/SpecialFeatures")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetSpecialFeatures(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(userId.Value);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
+        var item = itemId.IsEmpty()
             ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is null)
         {
             return NotFound();
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
+        var dtoOptions = new DtoOptions();
 
-        var dtoOptions = new DtoOptions().AddClientFields(User);
-        if (item is IHasTrailers hasTrailers)
-        {
-            var trailers = hasTrailers.LocalTrailers;
-            return Ok(_dtoService.GetBaseItemDtos(trailers, dtoOptions, user, item).AsEnumerable());
-        }
-
-        return Ok(item.GetExtras()
-            .Where(e => e.ExtraType == ExtraType.Trailer)
+        return Ok(item
+            .GetExtras(user)
+            .Where(i => i.ExtraType.HasValue && BaseItem.DisplayExtraTypes.Contains(i.ExtraType.Value))
             .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item)));
     }
 
@@ -367,36 +501,103 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the special features.</returns>
     [HttpGet("Users/{userId}/Items/{itemId}/SpecialFeatures")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<BaseItemDto>> GetSpecialFeatures([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetSpecialFeaturesLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => GetSpecialFeatures(userId, itemId);
+
+    /// <summary>
+    /// Gets latest media.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="parentId">Specify this to localize the search to a specific item or folder. Omit to use the root.</param>
+    /// <param name="fields">Optional. Specify additional fields of information to return in the output.</param>
+    /// <param name="includeItemTypes">Optional. If specified, results will be filtered based on item type. This allows multiple, comma delimited.</param>
+    /// <param name="isPlayed">Filter by items that are played, or not.</param>
+    /// <param name="enableImages">Optional. include image information in output.</param>
+    /// <param name="imageTypeLimit">Optional. the max number of images to return, per image type.</param>
+    /// <param name="enableImageTypes">Optional. The image types to include in the output.</param>
+    /// <param name="enableUserData">Optional. include user data.</param>
+    /// <param name="limit">Return item limit.</param>
+    /// <param name="groupItems">Whether or not to group items into a parent container.</param>
+    /// <response code="200">Latest media returned.</response>
+    /// <returns>An <see cref="OkResult"/> containing the latest media.</returns>
+    [HttpGet("Items/Latest")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetLatestMedia(
+        [FromQuery] Guid? userId,
+        [FromQuery] Guid? parentId,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery] bool? isPlayed,
+        [FromQuery] bool? enableImages,
+        [FromQuery] int? imageTypeLimit,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery] bool? enableUserData,
+        [FromQuery] int limit = 20,
+        [FromQuery] bool groupItems = true)
     {
-        var user = _userManager.GetUserById(userId);
+        var requestUserId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(requestUserId);
         if (user is null)
         {
             return NotFound();
         }
 
-        var item = itemId.Equals(default)
-            ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
-        if (item is null)
+        if (!isPlayed.HasValue)
         {
-            return NotFound();
+            if (user.HidePlayedInLatest)
+            {
+                isPlayed = false;
+            }
         }
 
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
+        var dtoOptions = new DtoOptions { Fields = fields }
+            .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
+
+        var list = _userViewManager.GetLatestItems(
+            new LatestItemsQuery
+            {
+                GroupItems = groupItems,
+                IncludeItemTypes = includeItemTypes,
+                IsPlayed = isPlayed,
+                Limit = limit,
+                ParentId = parentId ?? Guid.Empty,
+                User = user,
+            },
+            dtoOptions);
+
+        var resolvedItems = new BaseItem[list.Count];
+        var childCounts = new int[list.Count];
+        for (int i = 0; i < list.Count; i++)
         {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
+            var tuple = list[i];
+            var item = tuple.Item2[0];
+            var childCount = 0;
+
+            if (tuple.Item1 is not null && (tuple.Item2.Count > 1 || tuple.Item1 is MusicAlbum))
+            {
+                item = tuple.Item1;
+                childCount = tuple.Item2.Count;
+            }
+
+            resolvedItems[i] = item;
+            childCounts[i] = childCount;
         }
 
-        var dtoOptions = new DtoOptions().AddClientFields(User);
+        // Fetch DTOs without visibility check since we've already done that in GetLatestItems and restore child counts afterwards
+        var dtos = _dtoService.GetBaseItemDtos(resolvedItems, dtoOptions, user, skipVisibilityCheck: true);
+        for (int i = 0; i < dtos.Count; i++)
+        {
+            if (childCounts[i] > 0)
+            {
+                dtos[i].ChildCount = childCounts[i];
+            }
+        }
 
-        return Ok(item
-            .GetExtras()
-            .Where(i => i.ExtraType.HasValue && BaseItem.DisplayExtraTypes.Contains(i.ExtraType.Value))
-            .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item)));
+        return Ok(dtos.AsEnumerable());
     }
 
     /// <summary>
@@ -417,88 +618,63 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the latest media.</returns>
     [HttpGet("Users/{userId}/Items/Latest")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<BaseItemDto>> GetLatestMedia(
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetLatestMediaLegacy(
         [FromRoute, Required] Guid userId,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
         [FromQuery] bool? isPlayed,
         [FromQuery] bool? enableImages,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] bool? enableUserData,
         [FromQuery] int limit = 20,
         [FromQuery] bool groupItems = true)
+        => GetLatestMedia(
+            userId,
+            parentId,
+            fields,
+            includeItemTypes,
+            isPlayed,
+            enableImages,
+            imageTypeLimit,
+            enableImageTypes,
+            enableUserData,
+            limit,
+            groupItems);
+
+    private async Task RefreshOnDemandIfNeeded(BaseItem item)
     {
-        var user = _userManager.GetUserById(userId);
-        if (user is null)
+        if (item is not Person)
         {
-            return NotFound();
+            return;
         }
 
-        if (!isPlayed.HasValue)
+        var hasMetadata = !string.IsNullOrWhiteSpace(item.Overview) && item.HasImage(ImageType.Primary);
+        if (hasMetadata || (DateTime.UtcNow - item.DateLastRefreshed).TotalDays < 3)
         {
-            if (user.HidePlayedInLatest)
-            {
-                isPlayed = false;
-            }
+            return;
         }
 
-        var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
-            .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
-
-        var list = _userViewManager.GetLatestItems(
-            new LatestItemsQuery
-            {
-                GroupItems = groupItems,
-                IncludeItemTypes = includeItemTypes,
-                IsPlayed = isPlayed,
-                Limit = limit,
-                ParentId = parentId ?? Guid.Empty,
-                UserId = userId,
-            },
-            dtoOptions);
-
-        var dtos = list.Select(i =>
+        var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
         {
-            var item = i.Item2[0];
-            var childCount = 0;
+            MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+            ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+            ForceSave = true
+        };
 
-            if (i.Item1 is not null && (i.Item2.Count > 1 || i.Item1 is MusicAlbum))
-            {
-                item = i.Item1;
-                childCount = i.Item2.Count;
-            }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        timeout.CancelAfter(RefreshOnDemandTimeout);
 
-            var dto = _dtoService.GetBaseItemDto(item, dtoOptions, user);
-
-            dto.ChildCount = childCount;
-
-            return dto;
-        });
-
-        return Ok(dtos);
-    }
-
-    private async Task RefreshItemOnDemandIfNeeded(BaseItem item)
-    {
-        if (item is Person)
+        try
         {
-            var hasMetdata = !string.IsNullOrWhiteSpace(item.Overview) && item.HasImage(ImageType.Primary);
-            var performFullRefresh = !hasMetdata && (DateTime.UtcNow - item.DateLastRefreshed).TotalDays >= 3;
-
-            if (!hasMetdata)
-            {
-                var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
-                {
-                    MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
-                    ImageRefreshMode = MetadataRefreshMode.FullRefresh,
-                    ForceSave = performFullRefresh
-                };
-
-                await item.RefreshMetadata(options, CancellationToken.None).ConfigureAwait(false);
-            }
+            await item.RefreshMetadata(options, timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            _providerManager.QueueRefresh(item.Id, options, RefreshPriority.High);
         }
     }
 
@@ -513,12 +689,15 @@ public class UserLibraryController : BaseJellyfinApiController
         // Get the user data for this item
         var data = _userDataRepository.GetUserData(user, item);
 
-        // Set favorite status
-        data.IsFavorite = isFavorite;
+        if (data is not null)
+        {
+            // Set favorite status
+            data.IsFavorite = isFavorite;
 
-        _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
+            _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
+        }
 
-        return _userDataRepository.GetUserDataDto(item, user);
+        return _userDataRepository.GetUserDataDto(item, user)!;
     }
 
     /// <summary>
@@ -527,59 +706,18 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <param name="user">The user.</param>
     /// <param name="item">The item.</param>
     /// <param name="likes">if set to <c>true</c> [likes].</param>
-    private UserItemDataDto UpdateUserItemRatingInternal(User user, BaseItem item, bool? likes)
+    private UserItemDataDto? UpdateUserItemRatingInternal(User user, BaseItem item, bool? likes)
     {
         // Get the user data for this item
         var data = _userDataRepository.GetUserData(user, item);
 
-        data.Likes = likes;
+        if (data is not null)
+        {
+            data.Likes = likes;
 
-        _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
+            _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
+        }
 
         return _userDataRepository.GetUserDataDto(item, user);
-    }
-
-    /// <summary>
-    /// Gets an item's lyrics.
-    /// </summary>
-    /// <param name="userId">User id.</param>
-    /// <param name="itemId">Item id.</param>
-    /// <response code="200">Lyrics returned.</response>
-    /// <response code="404">Something went wrong. No Lyrics will be returned.</response>
-    /// <returns>An <see cref="OkResult"/> containing the item's lyrics.</returns>
-    [HttpGet("Users/{userId}/Items/{itemId}/Lyrics")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<LyricResponse>> GetLyrics([FromRoute, Required] Guid userId, [FromRoute, Required] Guid itemId)
-    {
-        var user = _userManager.GetUserById(userId);
-
-        if (user is null)
-        {
-            return NotFound();
-        }
-
-        var item = itemId.Equals(default)
-            ? _libraryManager.GetUserRootFolder()
-            : _libraryManager.GetItemById(itemId);
-
-        if (item is null)
-        {
-            return NotFound();
-        }
-
-        if (item is not UserRootFolder
-            // Check the item is visible for the user
-            && !item.IsVisible(user))
-        {
-            return Unauthorized($"{user.Username} is not permitted to access item {item.Name}.");
-        }
-
-        var result = await _lyricManager.GetLyrics(item).ConfigureAwait(false);
-        if (result is not null)
-        {
-            return Ok(result);
-        }
-
-        return NotFound();
     }
 }

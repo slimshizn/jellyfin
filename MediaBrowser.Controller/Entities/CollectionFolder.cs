@@ -11,6 +11,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions.Json;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
@@ -43,6 +45,11 @@ namespace MediaBrowser.Controller.Entities
         }
 
         /// <summary>
+        /// Event raised when library options are updated for any collection folder.
+        /// </summary>
+        public static event EventHandler<LibraryOptionsUpdatedEventArgs> LibraryOptionsUpdated;
+
+        /// <summary>
         /// Gets the display preferences id.
         /// </summary>
         /// <remarks>
@@ -69,17 +76,30 @@ namespace MediaBrowser.Controller.Entities
         [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
-        public string CollectionType { get; set; }
+        public CollectionType? CollectionType { get; set; }
 
         /// <summary>
-        /// Gets the item's children.
+        /// Gets or sets the item's children.
         /// </summary>
         /// <remarks>
         /// Our children are actually just references to the ones in the physical root...
+        /// Setting to null propagates invalidation to physical folders since the getter
+        /// always delegates to <see cref="GetActualChildren"/> and never reads the backing field.
         /// </remarks>
         /// <value>The actual children.</value>
         [JsonIgnore]
-        public override IEnumerable<BaseItem> Children => GetActualChildren();
+        public override IEnumerable<BaseItem> Children
+        {
+            get => GetActualChildren();
+            set
+            {
+                // The getter delegates to physical folders, so invalidate their caches.
+                foreach (var folder in GetPhysicalFolders(true))
+                {
+                    folder.Children = null;
+                }
+            }
+        }
 
         [JsonIgnore]
         public override bool SupportsPeople => false;
@@ -92,6 +112,16 @@ namespace MediaBrowser.Controller.Entities
         public LibraryOptions GetLibraryOptions()
         {
             return GetLibraryOptions(Path);
+        }
+
+        public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)
+        {
+            if (GetLibraryOptions().Enabled)
+            {
+                return base.IsVisible(user, skipAllowedTagsCheck);
+            }
+
+            return false;
         }
 
         private static LibraryOptions LoadLibraryOptions(string path)
@@ -156,6 +186,8 @@ namespace MediaBrowser.Controller.Entities
             }
 
             XmlSerializer.SerializeToFile(clone, GetLibraryOptionsPath(path));
+
+            LibraryOptionsUpdated?.Invoke(null, new LibraryOptionsUpdatedEventArgs(path, options));
         }
 
         public static void OnCollectionFolderChange()
@@ -304,11 +336,12 @@ namespace MediaBrowser.Controller.Entities
         /// <param name="progress">The progress.</param>
         /// <param name="recursive">if set to <c>true</c> [recursive].</param>
         /// <param name="refreshChildMetadata">if set to <c>true</c> [refresh child metadata].</param>
+        /// <param name="allowRemoveRoot">remove item even this folder is root.</param>
         /// <param name="refreshOptions">The refresh options.</param>
         /// <param name="directoryService">The directory service.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>Task.</returns>
-        protected override Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
+        protected override Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, bool allowRemoveRoot, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;
         }

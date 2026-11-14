@@ -1,7 +1,7 @@
 #pragma warning disable CS1591
 
 using System;
-using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 
 namespace MediaBrowser.Model.Configuration
 {
@@ -69,5 +69,10 @@ namespace MediaBrowser.Model.Configuration
         public bool RememberSubtitleSelections { get; set; }
 
         public bool EnableNextEpisodeAutoPlay { get; set; }
+
+        /// <summary>
+        /// Gets or sets the id of the selected cast receiver.
+        /// </summary>
+        public string? CastReceiverId { get; set; }
     }
 }

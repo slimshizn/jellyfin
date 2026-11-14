@@ -5,6 +5,10 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Constants;
+using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Helpers;
+using Jellyfin.Data.Enums;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
@@ -70,7 +74,7 @@ public class ItemUpdateController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult> UpdateItem([FromRoute, Required] Guid itemId, [FromBody, Required] BaseItemDto request)
     {
-        var item = _libraryManager.GetItemById(itemId);
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, User.GetUserId());
         if (item is null)
         {
             return NotFound();
@@ -143,14 +147,21 @@ public class ItemUpdateController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult<MetadataEditorInfo> GetMetadataEditorInfo([FromRoute, Required] Guid itemId)
     {
-        var item = _libraryManager.GetItemById(itemId);
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
 
         var info = new MetadataEditorInfo
         {
             ParentalRatingOptions = _localizationManager.GetParentalRatings().ToList(),
             ExternalIdInfos = _providerManager.GetExternalIdInfos(item).ToArray(),
             Countries = _localizationManager.GetCountries().ToArray(),
-            Cultures = _localizationManager.GetCultures().ToArray()
+            Cultures = _localizationManager.GetCultures()
+                .DistinctBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(c => c.DisplayName)
+                .ToArray()
         };
 
         if (!item.IsVirtualItem
@@ -164,18 +175,19 @@ public class ItemUpdateController : BaseJellyfinApiController
             var inheritedContentType = _libraryManager.GetInheritedContentType(item);
             var configuredContentType = _libraryManager.GetConfiguredContentType(item);
 
-            if (string.IsNullOrWhiteSpace(inheritedContentType) ||
-                !string.IsNullOrWhiteSpace(configuredContentType))
+            if (inheritedContentType is null || configuredContentType is not null)
             {
                 info.ContentTypeOptions = GetContentTypeOptions(true).ToArray();
                 info.ContentType = configuredContentType;
 
-                if (string.IsNullOrWhiteSpace(inheritedContentType)
-                    || string.Equals(inheritedContentType, CollectionType.TvShows, StringComparison.OrdinalIgnoreCase))
+                if (inheritedContentType is null
+                    || inheritedContentType == CollectionType.tvshows
+                    || inheritedContentType == CollectionType.movies)
                 {
                     info.ContentTypeOptions = info.ContentTypeOptions
                         .Where(i => string.IsNullOrWhiteSpace(i.Value)
-                                    || string.Equals(i.Value, CollectionType.TvShows, StringComparison.OrdinalIgnoreCase))
+                                    || string.Equals(i.Value, "TvShows", StringComparison.OrdinalIgnoreCase)
+                                    || string.Equals(i.Value, "Movies", StringComparison.OrdinalIgnoreCase))
                         .ToArray();
                 }
             }
@@ -197,7 +209,7 @@ public class ItemUpdateController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult UpdateItemContentType([FromRoute, Required] Guid itemId, [FromQuery] string? contentType)
     {
-        var item = _libraryManager.GetItemById(itemId);
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, User.GetUserId());
         if (item is null)
         {
             return NotFound();
@@ -224,12 +236,13 @@ public class ItemUpdateController : BaseJellyfinApiController
         return NoContent();
     }
 
-    private async Task UpdateItem(BaseItemDto request, BaseItem item)
+    internal async Task UpdateItem(BaseItemDto request, BaseItem item)
     {
         item.Name = request.Name;
         item.ForcedSortName = request.ForcedSortName;
 
         item.OriginalTitle = string.IsNullOrWhiteSpace(request.OriginalTitle) ? null : request.OriginalTitle;
+        item.OriginalLanguage = string.IsNullOrWhiteSpace(request.OriginalLanguage) ? null : request.OriginalLanguage;
 
         item.CriticRating = request.CriticRating;
 
@@ -237,7 +250,11 @@ public class ItemUpdateController : BaseJellyfinApiController
         item.IndexNumber = request.IndexNumber;
         item.ParentIndexNumber = request.ParentIndexNumber;
         item.Overview = request.Overview;
-        item.Genres = request.Genres;
+
+        if (request.Genres is not null)
+        {
+            item.Genres = request.Genres.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
 
         if (item is Episode episode)
         {
@@ -258,7 +275,7 @@ public class ItemUpdateController : BaseJellyfinApiController
 
         if (request.Studios is not null)
         {
-            item.Studios = request.Studios.Select(x => x.Name).ToArray();
+            item.Studios = Array.ConvertAll(request.Studios, x => x.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
         if (request.DateCreated.HasValue)
@@ -266,35 +283,76 @@ public class ItemUpdateController : BaseJellyfinApiController
             item.DateCreated = NormalizeDateTime(request.DateCreated.Value);
         }
 
+        if (request.SeriesName is not null && item is IHasSeries hasSeries)
+        {
+            hasSeries.SeriesName = request.SeriesName;
+        }
+
         item.EndDate = request.EndDate.HasValue ? NormalizeDateTime(request.EndDate.Value) : null;
         item.PremiereDate = request.PremiereDate.HasValue ? NormalizeDateTime(request.PremiereDate.Value) : null;
         item.ProductionYear = request.ProductionYear;
 
+        var previousOfficialRating = item.OfficialRating;
+        var previousCustomRating = item.CustomRating;
         request.OfficialRating = string.IsNullOrWhiteSpace(request.OfficialRating) ? null : request.OfficialRating;
         item.OfficialRating = request.OfficialRating;
         item.CustomRating = request.CustomRating;
 
         var currentTags = item.Tags;
-        var newTags = request.Tags;
-        var removedTags = currentTags.Except(newTags).ToList();
-        var addedTags = newTags.Except(currentTags).ToList();
-        item.Tags = newTags;
+        List<string> removedTags;
+        List<string> addedTags;
+        if (request.Tags is not null)
+        {
+            var newTags = request.Tags.Select(t => t.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            removedTags = currentTags.Except(newTags).ToList();
+            addedTags = newTags.Except(currentTags).ToList();
+            item.Tags = newTags;
+        }
+        else
+        {
+            removedTags = [];
+            addedTags = [];
+        }
 
         if (item is Series rseries)
         {
-            foreach (Season season in rseries.Children)
+            foreach (var season in rseries.Children.OfType<Season>())
             {
-                season.OfficialRating = request.OfficialRating;
-                season.CustomRating = request.CustomRating;
-                season.Tags = season.Tags.Concat(addedTags).Except(removedTags).Distinct().ToArray();
+                season.SeriesName = rseries.Name;
+
+                var previousSeasonOfficialRating = season.OfficialRating;
+                var previousSeasonCustomRating = season.CustomRating;
+                if (!season.LockedFields.Contains(MetadataField.OfficialRating))
+                {
+                    season.OfficialRating = GetPropagatedRating(season.OfficialRating, previousOfficialRating, request.OfficialRating);
+                }
+
+                season.CustomRating = GetPropagatedRating(season.CustomRating, previousCustomRating, request.CustomRating);
+
+                if (!season.LockedFields.Contains(MetadataField.Tags))
+                {
+                    season.Tags = season.Tags.Concat(addedTags).Except(removedTags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+
                 season.OnMetadataChanged();
                 await season.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
 
-                foreach (Episode ep in season.Children)
+                foreach (var ep in season.Children.OfType<Episode>())
                 {
-                    ep.OfficialRating = request.OfficialRating;
-                    ep.CustomRating = request.CustomRating;
-                    ep.Tags = ep.Tags.Concat(addedTags).Except(removedTags).Distinct().ToArray();
+                    ep.SeriesName = rseries.Name;
+
+                    if (!ep.LockedFields.Contains(MetadataField.OfficialRating))
+                    {
+                        ep.OfficialRating = GetPropagatedRating(ep.OfficialRating, previousSeasonOfficialRating, season.OfficialRating);
+                    }
+
+                    ep.CustomRating = GetPropagatedRating(ep.CustomRating, previousSeasonCustomRating, season.CustomRating);
+
+                    if (!ep.LockedFields.Contains(MetadataField.Tags))
+                    {
+                        ep.Tags = ep.Tags.Concat(addedTags).Except(removedTags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                    }
+
                     ep.OnMetadataChanged();
                     await ep.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
                 }
@@ -302,11 +360,22 @@ public class ItemUpdateController : BaseJellyfinApiController
         }
         else if (item is Season season)
         {
-            foreach (Episode ep in season.Children)
+            foreach (var ep in season.Children.OfType<Episode>())
             {
-                ep.OfficialRating = request.OfficialRating;
-                ep.CustomRating = request.CustomRating;
-                ep.Tags = ep.Tags.Concat(addedTags).Except(removedTags).Distinct().ToArray();
+                ep.SeasonName = season.Name;
+
+                if (!ep.LockedFields.Contains(MetadataField.OfficialRating))
+                {
+                    ep.OfficialRating = GetPropagatedRating(ep.OfficialRating, previousOfficialRating, request.OfficialRating);
+                }
+
+                ep.CustomRating = GetPropagatedRating(ep.CustomRating, previousCustomRating, request.CustomRating);
+
+                if (!ep.LockedFields.Contains(MetadataField.Tags))
+                {
+                    ep.Tags = ep.Tags.Concat(addedTags).Except(removedTags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+
                 ep.OnMetadataChanged();
                 await ep.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
             }
@@ -315,9 +384,18 @@ public class ItemUpdateController : BaseJellyfinApiController
         {
             foreach (BaseItem track in album.Children)
             {
-                track.OfficialRating = request.OfficialRating;
-                track.CustomRating = request.CustomRating;
-                track.Tags = track.Tags.Concat(addedTags).Except(removedTags).Distinct().ToArray();
+                if (!track.LockedFields.Contains(MetadataField.OfficialRating))
+                {
+                    track.OfficialRating = GetPropagatedRating(track.OfficialRating, previousOfficialRating, request.OfficialRating);
+                }
+
+                track.CustomRating = GetPropagatedRating(track.CustomRating, previousCustomRating, request.CustomRating);
+
+                if (!track.LockedFields.Contains(MetadataField.Tags))
+                {
+                    track.Tags = track.Tags.Concat(addedTags).Except(removedTags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+
                 track.OnMetadataChanged();
                 await track.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
             }
@@ -325,7 +403,7 @@ public class ItemUpdateController : BaseJellyfinApiController
 
         if (request.ProductionLocations is not null)
         {
-            item.ProductionLocations = request.ProductionLocations;
+            item.ProductionLocations = request.ProductionLocations.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
         item.PreferredMetadataCountryCode = request.PreferredMetadataCountryCode;
@@ -354,15 +432,10 @@ public class ItemUpdateController : BaseJellyfinApiController
             item.RunTimeTicks = request.RunTimeTicks;
         }
 
-        foreach (var pair in request.ProviderIds.ToList())
+        if (request.ProviderIds is not null)
         {
-            if (string.IsNullOrEmpty(pair.Value))
-            {
-                request.ProviderIds.Remove(pair.Key);
-            }
+            item.SetProviderIds(request.ProviderIds);
         }
-
-        item.ProviderIds = request.ProviderIds;
 
         if (item is Video video)
         {
@@ -373,10 +446,7 @@ public class ItemUpdateController : BaseJellyfinApiController
         {
             if (item is IHasAlbumArtist hasAlbumArtists)
             {
-                hasAlbumArtists.AlbumArtists = request
-                    .AlbumArtists
-                    .Select(i => i.Name)
-                    .ToArray();
+                hasAlbumArtists.AlbumArtists = Array.ConvertAll(request.AlbumArtists, i => i.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             }
         }
 
@@ -384,10 +454,7 @@ public class ItemUpdateController : BaseJellyfinApiController
         {
             if (item is IHasArtist hasArtists)
             {
-                hasArtists.Artists = request
-                    .ArtistItems
-                    .Select(i => i.Name)
-                    .ToArray();
+                hasArtists.Artists = Array.ConvertAll(request.ArtistItems, i => i.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             }
         }
 
@@ -414,6 +481,23 @@ public class ItemUpdateController : BaseJellyfinApiController
         }
     }
 
+    /// <summary>
+    /// Gets the rating a child should carry after its parent's rating changed from <paramref name="previousRating"/>
+    /// to <paramref name="newRating"/>: a child with no rating, or the parent's previous one, follows the parent.
+    /// A child with a rating of its own, or any child when the parent's rating did not change, keeps its rating.
+    /// </summary>
+    private static string? GetPropagatedRating(string? childRating, string? previousRating, string? newRating)
+    {
+        if (string.Equals(previousRating ?? string.Empty, newRating ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+        {
+            return childRating;
+        }
+
+        return string.IsNullOrEmpty(childRating) || string.Equals(childRating, previousRating, StringComparison.OrdinalIgnoreCase)
+            ? newRating
+            : childRating;
+    }
+
     private SeriesStatus? GetSeriesStatus(BaseItemDto item)
     {
         if (string.IsNullOrEmpty(item.Status))
@@ -421,7 +505,7 @@ public class ItemUpdateController : BaseJellyfinApiController
             return null;
         }
 
-        return (SeriesStatus)Enum.Parse(typeof(SeriesStatus), item.Status, true);
+        return Enum.Parse<SeriesStatus>(item.Status, true);
     }
 
     private DateTime NormalizeDateTime(DateTime val)

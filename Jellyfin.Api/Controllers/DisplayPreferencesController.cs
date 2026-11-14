@@ -3,8 +3,9 @@ using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
-using Jellyfin.Data.Entities;
-using Jellyfin.Data.Enums;
+using Jellyfin.Api.Helpers;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller;
 using MediaBrowser.Model.Dto;
@@ -19,6 +20,7 @@ namespace Jellyfin.Api.Controllers;
 /// Display Preferences Controller.
 /// </summary>
 [Authorize]
+[Tags("DisplayPreference")]
 public class DisplayPreferencesController : BaseJellyfinApiController
 {
     private readonly IDisplayPreferencesManager _displayPreferencesManager;
@@ -48,15 +50,17 @@ public class DisplayPreferencesController : BaseJellyfinApiController
     [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "displayPreferencesId", Justification = "Imported from ServiceStack")]
     public ActionResult<DisplayPreferencesDto> GetDisplayPreferences(
         [FromRoute, Required] string displayPreferencesId,
-        [FromQuery, Required] Guid userId,
+        [FromQuery] Guid? userId,
         [FromQuery, Required] string client)
     {
+        userId = RequestHelpers.GetUserId(User, userId);
+
         if (!Guid.TryParse(displayPreferencesId, out var itemId))
         {
             itemId = displayPreferencesId.GetMD5();
         }
 
-        var displayPreferences = _displayPreferencesManager.GetDisplayPreferences(userId, itemId, client);
+        var displayPreferences = _displayPreferencesManager.GetDisplayPreferences(userId.Value, itemId, client);
         var itemPreferences = _displayPreferencesManager.GetItemDisplayPreferences(displayPreferences.UserId, itemId, displayPreferences.Client);
         itemPreferences.ItemId = itemId;
 
@@ -93,9 +97,6 @@ public class DisplayPreferencesController : BaseJellyfinApiController
             dto.CustomPrefs.TryAdd(key, value);
         }
 
-        // This will essentially be a noop if no changes have been made, but new prefs must be saved at least.
-        _displayPreferencesManager.SaveChanges();
-
         return dto;
     }
 
@@ -113,10 +114,12 @@ public class DisplayPreferencesController : BaseJellyfinApiController
     [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "displayPreferencesId", Justification = "Imported from ServiceStack")]
     public ActionResult UpdateDisplayPreferences(
         [FromRoute, Required] string displayPreferencesId,
-        [FromQuery, Required] Guid userId,
+        [FromQuery] Guid? userId,
         [FromQuery, Required] string client,
         [FromBody, Required] DisplayPreferencesDto displayPreferences)
     {
+        userId = RequestHelpers.GetUserId(User, userId);
+
         HomeSectionType[] defaults =
         {
             HomeSectionType.SmallLibraryTiles,
@@ -134,7 +137,7 @@ public class DisplayPreferencesController : BaseJellyfinApiController
             itemId = displayPreferencesId.GetMD5();
         }
 
-        var existingDisplayPreferences = _displayPreferencesManager.GetDisplayPreferences(userId, itemId, client);
+        var existingDisplayPreferences = _displayPreferencesManager.GetDisplayPreferences(userId.Value, itemId, client);
         existingDisplayPreferences.IndexBy = Enum.TryParse<IndexingKind>(displayPreferences.IndexBy, true, out var indexBy) ? indexBy : null;
         existingDisplayPreferences.ShowBackdrop = displayPreferences.ShowBackdrop;
         existingDisplayPreferences.ShowSidebar = displayPreferences.ShowSidebar;
@@ -154,13 +157,13 @@ public class DisplayPreferencesController : BaseJellyfinApiController
         existingDisplayPreferences.SkipBackwardLength = displayPreferences.CustomPrefs.TryGetValue("skipBackLength", out var skipBackLength)
                                                         && !string.IsNullOrEmpty(skipBackLength)
             ? int.Parse(skipBackLength, CultureInfo.InvariantCulture)
-            : 10000;
+            : 15000;
         displayPreferences.CustomPrefs.Remove("skipBackLength");
 
         existingDisplayPreferences.SkipForwardLength = displayPreferences.CustomPrefs.TryGetValue("skipForwardLength", out var skipForwardLength)
                                                        && !string.IsNullOrEmpty(skipForwardLength)
             ? int.Parse(skipForwardLength, CultureInfo.InvariantCulture)
-            : 30000;
+            : 15000;
         displayPreferences.CustomPrefs.Remove("skipForwardLength");
 
         existingDisplayPreferences.DashboardTheme = displayPreferences.CustomPrefs.TryGetValue("dashboardTheme", out var theme)
@@ -189,9 +192,17 @@ public class DisplayPreferencesController : BaseJellyfinApiController
 
         foreach (var key in displayPreferences.CustomPrefs.Keys.Where(key => key.StartsWith("landing-", StringComparison.OrdinalIgnoreCase)))
         {
-            if (!Enum.TryParse<ViewType>(displayPreferences.CustomPrefs[key], true, out var type))
+            var viewType = displayPreferences.CustomPrefs[key];
+
+            if (string.IsNullOrEmpty(viewType))
             {
-                _logger.LogError("Invalid ViewType: {LandingScreenOption}", displayPreferences.CustomPrefs[key]);
+                displayPreferences.CustomPrefs.Remove(key);
+                continue;
+            }
+
+            if (!Enum.TryParse<ViewType>(viewType, true, out _))
+            {
+                _logger.LogError("Invalid ViewType: {LandingScreenOption}", viewType);
                 displayPreferences.CustomPrefs.Remove(key);
             }
         }
@@ -204,9 +215,9 @@ public class DisplayPreferencesController : BaseJellyfinApiController
         itemPrefs.ItemId = itemId;
 
         // Set all remaining custom preferences.
-        _displayPreferencesManager.SetCustomItemDisplayPreferences(userId, itemId, existingDisplayPreferences.Client, displayPreferences.CustomPrefs);
-        _displayPreferencesManager.SaveChanges();
-
+        _displayPreferencesManager.SetCustomItemDisplayPreferences(userId.Value, itemId, existingDisplayPreferences.Client, displayPreferences.CustomPrefs);
+        _displayPreferencesManager.UpdateItemDisplayPreferences(itemPrefs);
+        _displayPreferencesManager.UpdateDisplayPreferences(existingDisplayPreferences);
         return NoContent();
     }
 }

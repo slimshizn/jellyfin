@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
-using Jellyfin.Api.Constants;
+using System.Linq;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
 using Microsoft.AspNetCore.Authorization;
@@ -34,7 +36,14 @@ public class LocalizationController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<IEnumerable<CultureDto>> GetCultures()
     {
-        return Ok(_localization.GetCultures());
+        var allCultures = _localization.GetCultures();
+
+        var distinctCultures = allCultures
+            .DistinctBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(c => c.DisplayName)
+            .AsEnumerable();
+
+        return Ok(distinctCultures);
     }
 
     /// <summary>
@@ -44,7 +53,7 @@ public class LocalizationController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the list of countries.</returns>
     [HttpGet("Countries")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<CountryInfo>> GetCountries()
+    public ActionResult<IReadOnlyList<CountryInfo>> GetCountries()
     {
         return Ok(_localization.GetCountries());
     }
@@ -56,7 +65,7 @@ public class LocalizationController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the list of parental ratings.</returns>
     [HttpGet("ParentalRatings")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<ParentalRating>> GetParentalRatings()
+    public ActionResult<IReadOnlyList<ParentalRating>> GetParentalRatings()
     {
         return Ok(_localization.GetParentalRatings());
     }

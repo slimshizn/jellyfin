@@ -29,7 +29,7 @@ public class MediaInfoResolverTests
     public const string VideoDirectoryPath = "Test Data/Video";
     public const string VideoDirectoryRegex = @"Test Data[/\\]Video";
     public const string MetadataDirectoryPath = "library/00/00000000000000000000000000000000";
-    public const string MetadataDirectoryRegex = @"library.*";
+    public const string MetadataDirectoryRegex = "library.*";
 
     private readonly ILocalizationManager _localizationManager;
     private readonly MediaInfoResolver _subtitleResolver;
@@ -37,7 +37,7 @@ public class MediaInfoResolverTests
     public MediaInfoResolverTests()
     {
         // prep BaseItem and Video for calls made that expect managers
-        Video.LiveTvManager = Mock.Of<ILiveTvManager>();
+        Video.RecordingsManager = Mock.Of<IRecordingsManager>();
 
         var applicationPaths = new Mock<IServerApplicationPaths>().Object;
         var serverConfig = new Mock<IServerConfigurationManager>();
@@ -49,7 +49,7 @@ public class MediaInfoResolverTests
         var englishCultureDto = new CultureDto("English", "English", "en", new[] { "eng" });
 
         var localizationManager = new Mock<ILocalizationManager>(MockBehavior.Loose);
-        localizationManager.Setup(lm => lm.FindLanguageInfo(It.IsRegex(@"en.*", RegexOptions.IgnoreCase)))
+        localizationManager.Setup(lm => lm.FindLanguageInfo(It.IsRegex("en.*", RegexOptions.IgnoreCase)))
             .Returns(englishCultureDto);
         _localizationManager = localizationManager.Object;
 
@@ -79,7 +79,7 @@ public class MediaInfoResolverTests
     {
         // need a media source manager capable of returning something other than file protocol
         var mediaSourceManager = new Mock<IMediaSourceManager>();
-        mediaSourceManager.Setup(m => m.GetPathProtocol(It.IsRegex(@"http.*")))
+        mediaSourceManager.Setup(m => m.GetPathProtocol(It.IsRegex("http.*")))
             .Returns(MediaProtocol.Http);
         BaseItem.MediaSourceManager = mediaSourceManager.Object;
 
@@ -123,13 +123,13 @@ public class MediaInfoResolverTests
 
         var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
         // any path other than test target exists and provides an empty listing
-        directoryService.Setup(ds => ds.GetFilePaths(It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>()))
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsAny<string>(), It.IsAny<bool>()))
             .Returns(Array.Empty<string>());
 
         _subtitleResolver.GetExternalFiles(video.Object, directoryService.Object, false);
 
         directoryService.Verify(
-            ds => ds.GetFilePaths(It.IsRegex(pathNotFoundRegex), It.IsAny<bool>(), It.IsAny<bool>()),
+            ds => ds.GetFilePaths(It.IsRegex(pathNotFoundRegex), It.IsAny<bool>()),
             Times.Never);
     }
 
@@ -179,14 +179,154 @@ public class MediaInfoResolverTests
         Assert.Empty(streams);
     }
 
+    [Fact]
+    public void GetExternalFiles_VobSubIdxAndSubPair_OnlyReturnsIdxFile()
+    {
+        // VobSub (.sub) payloads only carry per-track language metadata when read
+        // alongside their paired .idx index file. When both are present, only the
+        // .idx file should be returned so it (not the raw .sub) gets probed.
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+
+        var video = new Movie
+        {
+            Path = VideoDirectoryPath + "/My.Video.mkv"
+        };
+
+        var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
+            .Returns(new[] { VideoDirectoryPath + "/My.Video.idx", VideoDirectoryPath + "/My.Video.sub" });
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
+            .Returns(Array.Empty<string>());
+
+        var streams = _subtitleResolver.GetExternalFiles(video, directoryService.Object, false).ToList();
+
+        var stream = Assert.Single(streams);
+        Assert.EndsWith(".idx", stream.Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetExternalFiles_VobSubIdxWithoutMatchingSub_DoesNotReturnIdxFile()
+    {
+        // An .idx file with no paired .sub cannot be probed for anything, so it must be
+        // left out entirely rather than surfaced as a doomed-to-fail probe candidate.
+        // Surfacing it anyway would also make it "exist" from Jellyfin's perspective
+        // even after the real .sub is deleted, preventing stale subtitle stream data
+        // from ever being cleared on a rescan.
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+
+        var video = new Movie
+        {
+            Path = VideoDirectoryPath + "/My.Video.mkv"
+        };
+
+        var directoryService = GetDirectoryServiceForExternalFile("My.Video.idx");
+        var streams = _subtitleResolver.GetExternalFiles(video, directoryService, false).ToList();
+
+        Assert.Empty(streams);
+    }
+
+    [Fact]
+    public void GetExternalFiles_StandaloneSubWithoutIdx_StillReturnsSubFile()
+    {
+        // Guards against the .idx/.sub pairing suppression firing when there is no
+        // .idx sidecar at all - a lone .sub file must still be returned.
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+
+        var video = new Movie
+        {
+            Path = VideoDirectoryPath + "/My.Video.mkv"
+        };
+
+        var directoryService = GetDirectoryServiceForExternalFile("My.Video.sub");
+        var streams = _subtitleResolver.GetExternalFiles(video, directoryService, false).ToList();
+
+        var stream = Assert.Single(streams);
+        Assert.EndsWith(".sub", stream.Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetExternalFiles_VobSubIdxAndSubInDifferentDirectories_DoesNotPair()
+    {
+        // A same-named .idx and .sub split across the video folder and the internal
+        // metadata folder cannot be paired by ffprobe (it only looks next to the .idx),
+        // so the .sub must still be returned, but the orphaned .idx (no sibling .sub in
+        // its own directory) must be left out since it cannot be probed.
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+
+        var video = new Movie
+        {
+            Path = VideoDirectoryPath + "/My.Video.mkv"
+        };
+
+        var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
+            .Returns(new[] { VideoDirectoryPath + "/My.Video.sub" });
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
+            .Returns(new[] { MetadataDirectoryPath + "/My.Video.idx" });
+
+        var streams = _subtitleResolver.GetExternalFiles(video, directoryService.Object, false).ToList();
+
+        var stream = Assert.Single(streams);
+        Assert.EndsWith(".sub", stream.Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetExternalFiles_VobSubIdxAndSubWithMatchingLanguageFlag_SuppressesSub()
+    {
+        // A .idx/.sub pair sharing the same filename flags (e.g. a language token) should
+        // still pair and suppress the .sub, just like an unflagged pair.
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+
+        var video = new Movie
+        {
+            Path = VideoDirectoryPath + "/My.Video.mkv"
+        };
+
+        var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
+            .Returns(new[] { VideoDirectoryPath + "/My.Video.en.idx", VideoDirectoryPath + "/My.Video.en.sub" });
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
+            .Returns(Array.Empty<string>());
+
+        var streams = _subtitleResolver.GetExternalFiles(video, directoryService.Object, false).ToList();
+
+        var stream = Assert.Single(streams);
+        Assert.EndsWith(".idx", stream.Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetExternalFiles_VobSubIdxAndSubWithMismatchedNames_DoesNotPair()
+    {
+        // An .idx and .sub with different basenames (e.g. differing filename flags) are not
+        // a pair ffprobe would resolve. The .sub must still be returned, but the orphaned
+        // .idx (no same-named sibling .sub) must be left out since it cannot be probed.
+        BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
+
+        var video = new Movie
+        {
+            Path = VideoDirectoryPath + "/My.Video.mkv"
+        };
+
+        var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
+            .Returns(new[] { VideoDirectoryPath + "/My.Video.idx", VideoDirectoryPath + "/My.Video.en.sub" });
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
+            .Returns(Array.Empty<string>());
+
+        var streams = _subtitleResolver.GetExternalFiles(video, directoryService.Object, false).ToList();
+
+        var stream = Assert.Single(streams);
+        Assert.EndsWith(".sub", stream.Path, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("https://url.com/My.Video.mkv")]
     [InlineData(VideoDirectoryPath)] // valid but no files found for this test
-    public async void GetExternalStreams_BadPaths_ReturnsNoSubtitles(string path)
+    public async Task GetExternalStreams_BadPaths_ReturnsNoSubtitles(string path)
     {
         // need a media source manager capable of returning something other than file protocol
         var mediaSourceManager = new Mock<IMediaSourceManager>();
-        mediaSourceManager.Setup(m => m.GetPathProtocol(It.IsRegex(@"http.*")))
+        mediaSourceManager.Setup(m => m.GetPathProtocol(It.IsRegex("http.*")))
             .Returns(MediaProtocol.Http);
         BaseItem.MediaSourceManager = mediaSourceManager.Object;
 
@@ -196,7 +336,7 @@ public class MediaInfoResolverTests
         };
 
         var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
-        directoryService.Setup(ds => ds.GetFilePaths(It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>()))
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsAny<string>(), It.IsAny<bool>()))
             .Returns(Array.Empty<string>());
 
         var mediaEncoder = Mock.Of<IMediaEncoder>(MockBehavior.Strict);
@@ -217,75 +357,65 @@ public class MediaInfoResolverTests
         string file = "My.Video.srt";
         data.Add(
             file,
-            new[]
-            {
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, null, null, 0)
-            },
-            new[]
-            {
+            ],
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, null, null, 0)
-            });
+            ]);
 
         // filename has metadata
         file = "My.Video.Title1.default.forced.sdh.en.srt";
         data.Add(
             file,
-            new[]
-            {
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, null, null, 0)
-            },
-            new[]
-            {
+            ],
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "eng", "Title1", 0, true, true, true)
-            });
+            ]);
 
         // single stream with metadata
         file = "My.Video.mks";
         data.Add(
             file,
-            new[]
-            {
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "eng", "Title", 0, true, true, true)
-            },
-            new[]
-            {
-                CreateMediaStream(VideoDirectoryPath + "/" + file, "eng", "Title", 0, true, true, true)
-            });
+            ],
+            [
+                CreateMediaStream(VideoDirectoryPath + "/" + file, "eng", "Title", 0, true, false, true)
+            ]);
 
         // stream wins for title/language, filename wins for flags when conflicting
         file = "My.Video.Title2.default.forced.sdh.en.srt";
         data.Add(
             file,
-            new[]
-            {
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "fra", "Metadata", 0)
-            },
-            new[]
-            {
+            ],
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "fra", "Metadata", 0, true, true, true)
-            });
+            ]);
 
         // multiple stream with metadata - filename flags ignored but other data filled in when missing from stream
         file = "My.Video.Title3.default.forced.en.srt";
         data.Add(
             file,
-            new[]
-            {
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, null, null, 0, true, true),
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "fra", "Metadata", 1)
-            },
-            new[]
-            {
+            ],
+            [
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "eng", "Title3", 0, true, true),
                 CreateMediaStream(VideoDirectoryPath + "/" + file, "fra", "Metadata", 1)
-            });
+            ]);
 
         return data;
     }
 
     [Theory]
     [MemberData(nameof(GetExternalStreams_MergeMetadata_HandlesOverridesCorrectly_Data))]
-    public async void GetExternalStreams_MergeMetadata_HandlesOverridesCorrectly(string file, MediaStream[] inputStreams, MediaStream[] expectedStreams)
+    public async Task GetExternalStreams_MergeMetadata_HandlesOverridesCorrectly(string file, MediaStream[] inputStreams, MediaStream[] expectedStreams)
     {
         BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
 
@@ -335,7 +465,7 @@ public class MediaInfoResolverTests
     [InlineData(1, 2)]
     [InlineData(2, 1)]
     [InlineData(2, 2)]
-    public async void GetExternalStreams_StreamIndex_HandlesFilesAndContainers(int fileCount, int streamCount)
+    public async Task GetExternalStreams_StreamIndex_HandlesFilesAndContainers(int fileCount, int streamCount)
     {
         BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
 
@@ -351,9 +481,9 @@ public class MediaInfoResolverTests
         }
 
         var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
-        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>(), It.IsAny<bool>()))
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
             .Returns(files);
-        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>(), It.IsAny<bool>()))
+        directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
             .Returns(Array.Empty<string>());
 
         List<MediaStream> GenerateMediaStreams()
@@ -423,16 +553,16 @@ public class MediaInfoResolverTests
         var directoryService = new Mock<IDirectoryService>(MockBehavior.Strict);
         if (useMetadataDirectory)
         {
-            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>(), It.IsAny<bool>()))
+            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
                 .Returns(Array.Empty<string>());
-            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>(), It.IsAny<bool>()))
+            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
                 .Returns(new[] { MetadataDirectoryPath + "/" + file });
         }
         else
         {
-            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>(), It.IsAny<bool>()))
+            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(VideoDirectoryRegex), It.IsAny<bool>()))
                 .Returns(new[] { VideoDirectoryPath + "/" + file });
-            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>(), It.IsAny<bool>()))
+            directoryService.Setup(ds => ds.GetFilePaths(It.IsRegex(MetadataDirectoryRegex), It.IsAny<bool>()))
                 .Returns(Array.Empty<string>());
         }
 

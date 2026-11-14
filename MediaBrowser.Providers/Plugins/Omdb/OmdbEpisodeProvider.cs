@@ -44,7 +44,9 @@ namespace MediaBrowser.Providers.Plugins.Omdb
             var result = new MetadataResult<Episode>
             {
                 Item = new Episode(),
-                QueriedById = true
+                QueriedById = true,
+                // OMDb is not localized, everything it returns is English
+                ResultLanguage = "en"
             };
 
             // Allowing this will dramatically increase scan times
@@ -55,13 +57,12 @@ namespace MediaBrowser.Providers.Plugins.Omdb
 
             if (info.SeriesProviderIds.TryGetValue(MetadataProvider.Imdb.ToString(), out string? seriesImdbId)
                 && !string.IsNullOrEmpty(seriesImdbId)
-                && info.IndexNumber.HasValue
-                && info.ParentIndexNumber.HasValue)
+                && info.IndexNumber.HasValue)
             {
                 result.HasMetadata = await _omdbProvider.FetchEpisodeData(
                     result,
                     info.IndexNumber.Value,
-                    info.ParentIndexNumber.Value,
+                    info.ParentIndexNumber ?? 1,
                     info.GetProviderId(MetadataProvider.Imdb),
                     seriesImdbId,
                     info.MetadataLanguage,

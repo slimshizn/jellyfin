@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -23,6 +25,7 @@ namespace Jellyfin.Api.Controllers;
 /// Channels Controller.
 /// </summary>
 [Authorize]
+[Tags("Channel")]
 public class ChannelsController : BaseJellyfinApiController
 {
     private readonly IChannelManager _channelManager;
@@ -120,13 +123,13 @@ public class ChannelsController : BaseJellyfinApiController
         [FromQuery] Guid? userId,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields)
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
 
@@ -134,45 +137,13 @@ public class ChannelsController : BaseJellyfinApiController
         {
             Limit = limit,
             StartIndex = startIndex,
-            ChannelIds = new[] { channelId },
+            ChannelIds = [channelId],
             ParentId = folderId ?? Guid.Empty,
             OrderBy = RequestHelpers.GetOrderBy(sortBy, sortOrder),
             DtoOptions = new DtoOptions { Fields = fields }
         };
 
-        foreach (var filter in filters)
-        {
-            switch (filter)
-            {
-                case ItemFilter.IsFolder:
-                    query.IsFolder = true;
-                    break;
-                case ItemFilter.IsNotFolder:
-                    query.IsFolder = false;
-                    break;
-                case ItemFilter.IsUnplayed:
-                    query.IsPlayed = false;
-                    break;
-                case ItemFilter.IsPlayed:
-                    query.IsPlayed = true;
-                    break;
-                case ItemFilter.IsFavorite:
-                    query.IsFavorite = true;
-                    break;
-                case ItemFilter.IsResumable:
-                    query.IsResumable = true;
-                    break;
-                case ItemFilter.Likes:
-                    query.IsLiked = true;
-                    break;
-                case ItemFilter.Dislikes:
-                    query.IsLiked = false;
-                    break;
-                case ItemFilter.IsFavoriteOrLikes:
-                    query.IsFavoriteOrLiked = true;
-                    break;
-            }
-        }
+        query.ApplyFilters(filters);
 
         return await _channelManager.GetChannelItems(query, CancellationToken.None).ConfigureAwait(false);
     }
@@ -196,12 +167,12 @@ public class ChannelsController : BaseJellyfinApiController
         [FromQuery] Guid? userId,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] channelIds)
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] channelIds)
     {
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = userId.Value.Equals(default)
+        var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
 
@@ -213,39 +184,7 @@ public class ChannelsController : BaseJellyfinApiController
             DtoOptions = new DtoOptions { Fields = fields }
         };
 
-        foreach (var filter in filters)
-        {
-            switch (filter)
-            {
-                case ItemFilter.IsFolder:
-                    query.IsFolder = true;
-                    break;
-                case ItemFilter.IsNotFolder:
-                    query.IsFolder = false;
-                    break;
-                case ItemFilter.IsUnplayed:
-                    query.IsPlayed = false;
-                    break;
-                case ItemFilter.IsPlayed:
-                    query.IsPlayed = true;
-                    break;
-                case ItemFilter.IsFavorite:
-                    query.IsFavorite = true;
-                    break;
-                case ItemFilter.IsResumable:
-                    query.IsResumable = true;
-                    break;
-                case ItemFilter.Likes:
-                    query.IsLiked = true;
-                    break;
-                case ItemFilter.Dislikes:
-                    query.IsLiked = false;
-                    break;
-                case ItemFilter.IsFavoriteOrLikes:
-                    query.IsFavoriteOrLiked = true;
-                    break;
-            }
-        }
+        query.ApplyFilters(filters);
 
         return await _channelManager.GetLatestChannelItems(query, CancellationToken.None).ConfigureAwait(false);
     }

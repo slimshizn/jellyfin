@@ -15,10 +15,9 @@ namespace Emby.Server.Implementations.Serialization
     {
         // Need to cache these
         // http://dotnetcodebox.blogspot.com/2013/01/xmlserializer-class-may-result-in.html
-        private static readonly ConcurrentDictionary<string, XmlSerializer> _serializers =
-            new ConcurrentDictionary<string, XmlSerializer>();
+        private readonly ConcurrentDictionary<string, XmlSerializer> _serializers = new();
 
-        private static XmlSerializer GetSerializer(Type type)
+        private XmlSerializer GetSerializer(Type type)
             => _serializers.GetOrAdd(
                 type.FullName ?? throw new ArgumentException($"Invalid type {type}."),
                 static (_, t) => new XmlSerializer(t),
@@ -86,9 +85,17 @@ namespace Emby.Server.Implementations.Serialization
         /// <returns>System.Object.</returns>
         public object? DeserializeFromFile(Type type, string file)
         {
-            using (var stream = File.OpenRead(file))
+            try
             {
-                return DeserializeFromStream(type, stream);
+                using (var stream = File.OpenRead(file))
+                {
+                    return DeserializeFromStream(type, stream);
+                }
+            }
+            catch (Exception ex)
+            {
+                ex.Data.Add("Filename", file);
+                throw;
             }
         }
 

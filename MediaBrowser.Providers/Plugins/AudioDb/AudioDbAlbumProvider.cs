@@ -21,6 +21,7 @@ using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Providers;
+using MediaBrowser.Providers.Manager;
 using MediaBrowser.Providers.Music;
 
 namespace MediaBrowser.Providers.Plugins.AudioDb
@@ -77,7 +78,7 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
                     {
                         result.Item = new MusicAlbum();
                         result.HasMetadata = true;
-                        ProcessResult(result.Item, obj.album[0], info.MetadataLanguage);
+                        ProcessResult(result, obj.album[0], info.MetadataLanguage);
                     }
                 }
             }
@@ -85,8 +86,10 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
             return result;
         }
 
-        private void ProcessResult(MusicAlbum item, Album result, string preferredLanguage)
+        private void ProcessResult(MetadataResult<MusicAlbum> metadataResult, Album result, string preferredLanguage)
         {
+            var item = metadataResult.Item;
+
             if (Plugin.Instance.Configuration.ReplaceAlbumName && !string.IsNullOrWhiteSpace(result.strAlbum))
             {
                 item.Album = result.strAlbum;
@@ -94,7 +97,7 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
 
             if (!string.IsNullOrWhiteSpace(result.strArtist))
             {
-                item.AlbumArtists = new string[] { result.strArtist };
+                item.AlbumArtists = [result.strArtist];
             }
 
             if (!string.IsNullOrEmpty(result.intYearReleased))
@@ -104,7 +107,7 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
 
             if (!string.IsNullOrEmpty(result.strGenre))
             {
-                item.Genres = new[] { result.strGenre };
+                item.Genres = [result.strGenre];
             }
 
             item.SetProviderId(MetadataProvider.AudioDbArtist, result.idArtist);
@@ -113,56 +116,61 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
             item.SetProviderId(MetadataProvider.MusicBrainzAlbumArtist, result.strMusicBrainzArtistID);
             item.SetProviderId(MetadataProvider.MusicBrainzReleaseGroup, result.strMusicBrainzID);
 
-            string overview = null;
-
-            if (string.Equals(preferredLanguage, "de", StringComparison.OrdinalIgnoreCase))
-            {
-                overview = result.strDescriptionDE;
-            }
-            else if (string.Equals(preferredLanguage, "fr", StringComparison.OrdinalIgnoreCase))
-            {
-                overview = result.strDescriptionFR;
-            }
-            else if (string.Equals(preferredLanguage, "nl", StringComparison.OrdinalIgnoreCase))
-            {
-                overview = result.strDescriptionNL;
-            }
-            else if (string.Equals(preferredLanguage, "ru", StringComparison.OrdinalIgnoreCase))
-            {
-                overview = result.strDescriptionRU;
-            }
-            else if (string.Equals(preferredLanguage, "it", StringComparison.OrdinalIgnoreCase))
-            {
-                overview = result.strDescriptionIT;
-            }
-            else if ((preferredLanguage ?? string.Empty).StartsWith("pt", StringComparison.OrdinalIgnoreCase))
-            {
-                overview = result.strDescriptionPT;
-            }
+            var language = MetadataLanguageUtils.GetLanguageSubtag(preferredLanguage);
+            var overview = GetDescription(result, language);
 
             if (string.IsNullOrWhiteSpace(overview))
             {
-                overview = result.strDescriptionEN;
+                overview = string.IsNullOrWhiteSpace(result.strDescriptionEN)
+                    ? result.strDescription
+                    : result.strDescriptionEN;
+
+                // The description is not in the requested language, mark it as English so it does not
+                // block a provider further down the list that can serve the requested language
+                metadataResult.ResultLanguage = "en";
+            }
+            else
+            {
+                metadataResult.ResultLanguage = language;
             }
 
             item.Overview = (overview ?? string.Empty).StripHtml();
         }
 
-        internal Task EnsureInfo(string musicBrainzReleaseGroupId, CancellationToken cancellationToken)
+        private static string GetDescription(Album result, string language)
+            => language switch
+            {
+                "de" => result.strDescriptionDE,
+                "en" => result.strDescriptionEN,
+                "es" => result.strDescriptionES,
+                "fr" => result.strDescriptionFR,
+                "he" => result.strDescriptionIL,
+                "hu" => result.strDescriptionHU,
+                "it" => result.strDescriptionIT,
+                "ja" => result.strDescriptionJP,
+                "nl" => result.strDescriptionNL,
+                "no" or "nb" or "nn" => result.strDescriptionNO,
+                "pl" => result.strDescriptionPL,
+                "pt" => result.strDescriptionPT,
+                "ru" => result.strDescriptionRU,
+                "sv" => result.strDescriptionSE,
+                "zh" => result.strDescriptionCN,
+                _ => null
+            };
+
+        internal async Task EnsureInfo(string musicBrainzReleaseGroupId, CancellationToken cancellationToken)
         {
             var xmlPath = GetAlbumInfoPath(_config.ApplicationPaths, musicBrainzReleaseGroupId);
 
             var fileInfo = _fileSystem.GetFileSystemInfo(xmlPath);
 
-            if (fileInfo.Exists)
+            if (fileInfo.Exists
+                && (DateTime.UtcNow - _fileSystem.GetLastWriteTimeUtc(fileInfo)).TotalDays <= 2)
             {
-                if ((DateTime.UtcNow - _fileSystem.GetLastWriteTimeUtc(fileInfo)).TotalDays <= 2)
-                {
-                    return Task.CompletedTask;
-                }
+                return;
             }
 
-            return DownloadInfo(musicBrainzReleaseGroupId, cancellationToken);
+            await DownloadInfo(musicBrainzReleaseGroupId, cancellationToken).ConfigureAwait(false);
         }
 
         internal async Task DownloadInfo(string musicBrainzReleaseGroupId, CancellationToken cancellationToken)
@@ -172,21 +180,21 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
             var url = AudioDbArtistProvider.BaseUrl + "/album-mb.php?i=" + musicBrainzReleaseGroupId;
 
             var path = GetAlbumInfoPath(_config.ApplicationPaths, musicBrainzReleaseGroupId);
+            var fileInfo = _fileSystem.GetFileSystemInfo(path);
+            if (fileInfo.Exists && (DateTime.UtcNow - _fileSystem.GetLastWriteTimeUtc(fileInfo)).TotalDays <= 2)
+            {
+                return;
+            }
 
             Directory.CreateDirectory(Path.GetDirectoryName(path));
 
             using var response = await _httpClientFactory.CreateClient(NamedClient.Default).GetAsync(url, cancellationToken).ConfigureAwait(false);
-            var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            await using (stream.ConfigureAwait(false))
+            var fileStreamOptions = AsyncFile.WriteOptions;
+            fileStreamOptions.Mode = FileMode.Create;
+            var fs = new FileStream(path, fileStreamOptions);
+            await using (fs.ConfigureAwait(false))
             {
-                var fileStreamOptions = AsyncFile.WriteOptions;
-                fileStreamOptions.Mode = FileMode.Create;
-                fileStreamOptions.PreallocationSize = stream.Length;
-                var xmlFileStream = new FileStream(path, fileStreamOptions);
-                await using (xmlFileStream.ConfigureAwait(false))
-                {
-                    await stream.CopyToAsync(xmlFileStream, cancellationToken).ConfigureAwait(false);
-                }
+                await response.Content.CopyToAsync(fs, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -241,6 +249,8 @@ namespace MediaBrowser.Providers.Plugins.AudioDb
             public string strAlbumThumb { get; set; }
 
             public string strAlbumCDart { get; set; }
+
+            public string strDescription { get; set; }
 
             public string strDescriptionEN { get; set; }
 

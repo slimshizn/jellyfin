@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Threading.Tasks;
-using Jellyfin.Api.Constants;
+using Jellyfin.Extensions;
+using MediaBrowser.Common.Api;
+using MediaBrowser.Common.Plugins;
 using MediaBrowser.Common.Updates;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Model.Updates;
@@ -17,21 +19,28 @@ namespace Jellyfin.Api.Controllers;
 /// Package Controller.
 /// </summary>
 [Route("")]
-[Authorize]
+[Authorize(Policy = Policies.RequiresElevation)]
+[Tags("Plugin")]
 public class PackageController : BaseJellyfinApiController
 {
     private readonly IInstallationManager _installationManager;
     private readonly IServerConfigurationManager _serverConfigurationManager;
+    private readonly IPluginManager _pluginManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PackageController"/> class.
     /// </summary>
     /// <param name="installationManager">Instance of the <see cref="IInstallationManager"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
-    public PackageController(IInstallationManager installationManager, IServerConfigurationManager serverConfigurationManager)
+    /// <param name="pluginManager">Instance of the <see cref="IPluginManager"/> interface.</param>
+    public PackageController(
+        IInstallationManager installationManager,
+        IServerConfigurationManager serverConfigurationManager,
+        IPluginManager pluginManager)
     {
         _installationManager = installationManager;
         _serverConfigurationManager = serverConfigurationManager;
+        _pluginManager = pluginManager;
     }
 
     /// <summary>
@@ -47,6 +56,13 @@ public class PackageController : BaseJellyfinApiController
         [FromRoute, Required] string name,
         [FromQuery] Guid? assemblyGuid)
     {
+        // Plugins bundled with the server are not published to any repository, so querying
+        // the configured repositories for them can only ever fail, and does so slowly.
+        if (IsBundledPlugin(name, assemblyGuid))
+        {
+            return NotFound();
+        }
+
         var packages = await _installationManager.GetAvailablePackages().ConfigureAwait(false);
         var result = _installationManager.FilterPackages(
                 packages,
@@ -89,13 +105,17 @@ public class PackageController : BaseJellyfinApiController
     [HttpPost("Packages/Installed/{name}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [Authorize(Policy = Policies.RequiresElevation)]
     public async Task<ActionResult> InstallPackage(
         [FromRoute, Required] string name,
         [FromQuery] Guid? assemblyGuid,
         [FromQuery] string? version,
         [FromQuery] string? repositoryUrl)
     {
+        if (IsBundledPlugin(name, assemblyGuid))
+        {
+            return NotFound();
+        }
+
         var packages = await _installationManager.GetAvailablePackages().ConfigureAwait(false);
         if (!string.IsNullOrEmpty(repositoryUrl))
         {
@@ -127,7 +147,6 @@ public class PackageController : BaseJellyfinApiController
     /// <response code="204">Installation cancelled.</response>
     /// <returns>A <see cref="NoContentResult"/> on successfully cancelling a package installation.</returns>
     [HttpDelete("Packages/Installing/{packageId}")]
-    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public ActionResult CancelPackageInstallation(
         [FromRoute, Required] Guid packageId)
@@ -155,12 +174,20 @@ public class PackageController : BaseJellyfinApiController
     /// <response code="204">Package repositories saved.</response>
     /// <returns>A <see cref="NoContentResult"/>.</returns>
     [HttpPost("Repositories")]
-    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public ActionResult SetRepositories([FromBody, Required] RepositoryInfo[] repositoryInfos)
     {
         _serverConfigurationManager.Configuration.PluginRepositories = repositoryInfos;
         _serverConfigurationManager.SaveConfiguration();
         return NoContent();
+    }
+
+    private bool IsBundledPlugin(string name, Guid? assemblyGuid)
+    {
+        var plugin = assemblyGuid is Guid id && !id.IsEmpty()
+            ? _pluginManager.GetPlugin(id)
+            : _pluginManager.Plugins.FirstOrDefault(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+        return plugin?.Instance?.CanUninstall == false;
     }
 }

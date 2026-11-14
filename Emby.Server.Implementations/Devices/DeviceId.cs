@@ -1,35 +1,43 @@
-#nullable disable
-
-#pragma warning disable CS1591
-
 using System;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 using MediaBrowser.Common.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Devices
 {
+    /// <summary>
+    /// Provides the persistent unique identifier of this server installation.
+    /// </summary>
     public class DeviceId
     {
         private readonly IApplicationPaths _appPaths;
         private readonly ILogger<DeviceId> _logger;
-        private readonly object _syncLock = new object();
+        private readonly Lock _syncLock = new();
 
-        private string _id;
+        private string? _id;
 
-        public DeviceId(IApplicationPaths appPaths, ILoggerFactory loggerFactory)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="DeviceId"/> class.
+        /// </summary>
+        /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+        /// <param name="logger">Instance of the <see cref="ILogger{DeviceId}"/> interface.</param>
+        public DeviceId(IApplicationPaths appPaths, ILogger<DeviceId> logger)
         {
             _appPaths = appPaths;
-            _logger = loggerFactory.CreateLogger<DeviceId>();
+            _logger = logger;
         }
 
-        public string Value => _id ?? (_id = GetDeviceId());
+        /// <summary>
+        /// Gets the device id, loading it from disk or generating and persisting a new one if none exists.
+        /// </summary>
+        public string Value => _id ??= GetDeviceId();
 
         private string CachePath => Path.Combine(_appPaths.DataPath, "device.txt");
 
-        private string GetCachedId()
+        private string? GetCachedId()
         {
             try
             {
@@ -65,7 +73,7 @@ namespace Emby.Server.Implementations.Devices
             {
                 var path = CachePath;
 
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                Directory.CreateDirectory(Path.GetDirectoryName(path) ?? throw new InvalidOperationException("Path can't be a root directory."));
 
                 lock (_syncLock)
                 {

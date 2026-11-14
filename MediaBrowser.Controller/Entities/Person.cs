@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Providers;
 using Microsoft.Extensions.Logging;
@@ -14,6 +15,7 @@ namespace MediaBrowser.Controller.Entities
     /// <summary>
     /// This is the full Person object that can be retrieved with all of it's data.
     /// </summary>
+    [Common.RequiresSourceSerialisation]
     public class Person : BaseItem, IItemByName, IHasLookupInfo<PersonLookupInfo>
     {
         /// <summary>
@@ -62,7 +64,7 @@ namespace MediaBrowser.Controller.Entities
             return value;
         }
 
-        public IList<BaseItem> GetTaggedItems(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetTaggedItems(InternalItemsQuery query)
         {
             query.PersonIds = new[] { Id };
 
@@ -72,6 +74,16 @@ namespace MediaBrowser.Controller.Entities
         public override bool CanDelete()
         {
             return false;
+        }
+
+        /// <inheritdoc />
+        /// <remarks>
+        /// People don't carry the tags of the media they appear in, so the allowed tags check
+        /// is skipped for them; otherwise no person would be visible to users with allowed tags configured.
+        /// </remarks>
+        public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)
+        {
+            return base.IsVisible(user, true);
         }
 
         public override bool IsSaveLocalMetadataEnabled()
@@ -86,10 +98,7 @@ namespace MediaBrowser.Controller.Entities
 
         public static string GetPath(string name, bool normalizeName)
         {
-            // Trim the period at the end because windows will have a hard time with that
-            var validFilename = normalizeName ?
-                FileSystem.GetValidFilename(name).Trim().TrimEnd('.') :
-                name;
+            var validFilename = normalizeName ? GetItemByNameFolderName(name) : name;
 
             string subFolderPrefix = null;
 

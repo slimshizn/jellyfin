@@ -1,14 +1,21 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -26,6 +33,7 @@ namespace Jellyfin.Api.Controllers;
 /// </summary>
 [Route("")]
 [Authorize]
+[Tags("Library")]
 public class ItemsController : BaseJellyfinApiController
 {
     private readonly IUserManager _userManager;
@@ -34,6 +42,8 @@ public class ItemsController : BaseJellyfinApiController
     private readonly IDtoService _dtoService;
     private readonly ILogger<ItemsController> _logger;
     private readonly ISessionManager _sessionManager;
+    private readonly IUserDataManager _userDataRepository;
+    private readonly ISearchManager _searchManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ItemsController"/> class.
@@ -44,13 +54,17 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
     /// <param name="sessionManager">Instance of the <see cref="ISessionManager"/> interface.</param>
+    /// <param name="userDataRepository">Instance of the <see cref="IUserDataManager"/> interface.</param>
+    /// <param name="searchManager">Instance of the <see cref="ISearchManager"/> interface.</param>
     public ItemsController(
         IUserManager userManager,
         ILibraryManager libraryManager,
         ILocalizationManager localization,
         IDtoService dtoService,
         ILogger<ItemsController> logger,
-        ISessionManager sessionManager)
+        ISessionManager sessionManager,
+        IUserDataManager userDataRepository,
+        ISearchManager searchManager)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
@@ -58,6 +72,8 @@ public class ItemsController : BaseJellyfinApiController
         _dtoService = dtoService;
         _logger = logger;
         _sessionManager = sessionManager;
+        _userDataRepository = userDataRepository;
+        _searchManager = searchManager;
     }
 
     /// <summary>
@@ -71,6 +87,7 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="hasSpecialFeature">Optional filter by items with special features.</param>
     /// <param name="hasTrailer">Optional filter by items with trailers.</param>
     /// <param name="adjacentTo">Optional. Return items that are siblings of a supplied item.</param>
+    /// <param name="indexNumber">Optional filter by index number.</param>
     /// <param name="parentIndexNumber">Optional filter by parent index number.</param>
     /// <param name="hasParentalRating">Optional filter by items that have or do not have a parental rating.</param>
     /// <param name="isHd">Optional filter by items that are HD or not.</param>
@@ -146,12 +163,14 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="nameLessThan">Optional filter by items whose name is equally or lesser than a given input string.</param>
     /// <param name="studioIds">Optional. If specified, results will be filtered based on studio id. This allows multiple, pipe delimited.</param>
     /// <param name="genreIds">Optional. If specified, results will be filtered based on genre id. This allows multiple, pipe delimited.</param>
+    /// <param name="audioLanguages">Optional. If specified, results will be filtered based on audio language. This allows multiple, comma delimited values.</param>
+    /// <param name="subtitleLanguages">Optional. If specified, results will be filtered based on subtitle language. This allows multiple, comma delimited values.</param>
     /// <param name="enableTotalRecordCount">Optional. Enable the total record count.</param>
     /// <param name="enableImages">Optional, include image information in output.</param>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the items.</returns>
     [HttpGet("Items")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<QueryResult<BaseItemDto>> GetItems(
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetItems(
         [FromQuery] Guid? userId,
         [FromQuery] string? maxOfficialRating,
         [FromQuery] bool? hasThemeSong,
@@ -160,12 +179,13 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] bool? hasSpecialFeature,
         [FromQuery] bool? hasTrailer,
         [FromQuery] Guid? adjacentTo,
+        [FromQuery] int? indexNumber,
         [FromQuery] int? parentIndexNumber,
         [FromQuery] bool? hasParentalRating,
         [FromQuery] bool? isHd,
         [FromQuery] bool? is4K,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] LocationType[] locationTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] LocationType[] excludeLocationTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] LocationType[] locationTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] LocationType[] excludeLocationTypes,
         [FromQuery] bool? isMissing,
         [FromQuery] bool? isUnaired,
         [FromQuery] double? minCommunityRating,
@@ -183,42 +203,42 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] bool? isNews,
         [FromQuery] bool? isKids,
         [FromQuery] bool? isSports,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeItemIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeItemIds,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] bool? recursive,
         [FromQuery] string? searchTerm,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] excludeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] includeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
         [FromQuery] bool? isFavorite,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] mediaTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] imageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] imageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
         [FromQuery] bool? isPlayed,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] genres,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] officialRatings,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] tags,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] int[] years,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] genres,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] officialRatings,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] tags,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] int[] years,
         [FromQuery] bool? enableUserData,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] string? person,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] personIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] personTypes,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] studios,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] artists,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] artistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] albumArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] contributingArtistIds,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] albums,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] albumIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] ids,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] VideoType[] videoTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] personIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] personTypes,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] studios,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] artists,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] artistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] albumArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] contributingArtistIds,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] albums,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] albumIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] VideoType[] videoTypes,
         [FromQuery] string? minOfficialRating,
         [FromQuery] bool? isLocked,
         [FromQuery] bool? isPlaceHolder,
@@ -229,21 +249,23 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] int? maxWidth,
         [FromQuery] int? maxHeight,
         [FromQuery] bool? is3D,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SeriesStatus[] seriesStatus,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SeriesStatus[] seriesStatus,
         [FromQuery] string? nameStartsWithOrGreater,
         [FromQuery] string? nameStartsWith,
         [FromQuery] string? nameLessThan,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] studioIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] studioIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] audioLanguages,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] subtitleLanguages,
         [FromQuery] bool enableTotalRecordCount = true,
         [FromQuery] bool? enableImages = true)
     {
         var isApiKey = User.GetIsApiKey();
         // if api key is used (auth.IsApiKey == true), then `user` will be null throughout this method
         userId = RequestHelpers.GetUserId(User, userId);
-        var user = !isApiKey && !userId.Value.Equals(default)
-            ? _userManager.GetUserById(userId.Value) ?? throw new ResourceNotFoundException()
-            : null;
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value) ?? throw new ResourceNotFoundException();
 
         // beyond this point, we're either using an api key or we have a valid user
         if (!isApiKey && user is null)
@@ -251,34 +273,70 @@ public class ItemsController : BaseJellyfinApiController
             return BadRequest("userId is required");
         }
 
-        var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
-            .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
-
-        if (includeItemTypes.Length == 1
-            && includeItemTypes[0] == BaseItemKind.BoxSet)
+        if (user is not null
+            && user.GetPreference(PreferenceKind.AllowedTags).Length != 0
+            && !fields.Contains(ItemFields.Tags))
         {
-            parentId = null;
+            fields = [.. fields, ItemFields.Tags];
         }
+
+        var dtoOptions = new DtoOptions { Fields = fields }
+            .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
 
         var item = _libraryManager.GetParentItem(parentId, userId);
         QueryResult<BaseItem> result;
+
+        Guid[] linkedChildAncestorIds = [];
+
+        includeItemTypes ??= [];
+        if (includeItemTypes.Length == 1
+            && (includeItemTypes[0] == BaseItemKind.BoxSet || includeItemTypes[0] == BaseItemKind.Playlist)
+            && item is not BoxSet
+            && item is not Playlist)
+        {
+            var itemCollectionType = item is IHasCollectionType hct ? hct.CollectionType : null;
+            var targetCollectionType = includeItemTypes[0] == BaseItemKind.BoxSet
+                ? CollectionType.boxsets
+                : CollectionType.playlists;
+            if (parentId.HasValue && item is not UserRootFolder && itemCollectionType != targetCollectionType)
+            {
+                linkedChildAncestorIds = [parentId.Value];
+            }
+
+            parentId = null;
+            item = _libraryManager.GetUserRootFolder();
+        }
 
         if (item is not Folder folder)
         {
             folder = _libraryManager.GetUserRootFolder();
         }
 
-        string? collectionType = null;
+        CollectionType? collectionType = null;
         if (folder is IHasCollectionType hasCollectionType)
         {
             collectionType = hasCollectionType.CollectionType;
         }
 
-        if (string.Equals(collectionType, CollectionType.Playlists, StringComparison.OrdinalIgnoreCase))
+        if (collectionType == CollectionType.playlists)
         {
             recursive = true;
-            includeItemTypes = new[] { BaseItemKind.Playlist };
+            includeItemTypes = [BaseItemKind.Playlist];
+        }
+        else if (folder is ICollectionFolder && includeItemTypes.Length == 0)
+        {
+            includeItemTypes = collectionType switch
+            {
+                CollectionType.boxsets => [BaseItemKind.BoxSet],
+                _ => []
+            };
+        }
+
+        // includeItemTypes on a library lists its contents recursively rather than just its
+        // immediate children, so default to a recursive query when the client didn't choose.
+        if (folder is ICollectionFolder && includeItemTypes.Length > 0)
+        {
+            recursive ??= true;
         }
 
         if (item is not UserRootFolder
@@ -291,219 +349,273 @@ public class ItemsController : BaseJellyfinApiController
             return Unauthorized($"{user.Username} is not permitted to access Library {item.Name}.");
         }
 
-        if ((recursive.HasValue && recursive.Value) || ids.Length != 0 || item is not UserRootFolder)
+        // Build the query up front so the dispatch below can decide the path from it.
+        // Use search providers when searchTerm is provided. Providers return only IDs and scores;
+        // items are loaded server-side via folder.GetItems below, which applies user-access filtering.
+        Dictionary<Guid, float>? searchResultScores = null;
+        Guid[] itemIds = ids;
+
+        if (!string.IsNullOrWhiteSpace(searchTerm))
         {
-            var query = new InternalItemsQuery(user)
+            var searchProviderQuery = new SearchProviderQuery
             {
-                IsPlayed = isPlayed,
-                MediaTypes = mediaTypes,
+                SearchTerm = searchTerm,
+                UserId = userId,
                 IncludeItemTypes = includeItemTypes,
                 ExcludeItemTypes = excludeItemTypes,
-                Recursive = recursive ?? false,
-                OrderBy = RequestHelpers.GetOrderBy(sortBy, sortOrder),
-                IsFavorite = isFavorite,
-                Limit = limit,
-                StartIndex = startIndex,
-                IsMissing = isMissing,
-                IsUnaired = isUnaired,
-                CollapseBoxSetItems = collapseBoxSetItems,
-                NameLessThan = nameLessThan,
-                NameStartsWith = nameStartsWith,
-                NameStartsWithOrGreater = nameStartsWithOrGreater,
-                HasImdbId = hasImdbId,
-                IsPlaceHolder = isPlaceHolder,
-                IsLocked = isLocked,
-                MinWidth = minWidth,
-                MinHeight = minHeight,
-                MaxWidth = maxWidth,
-                MaxHeight = maxHeight,
-                Is3D = is3D,
-                HasTvdbId = hasTvdbId,
-                HasTmdbId = hasTmdbId,
-                IsMovie = isMovie,
-                IsSeries = isSeries,
-                IsNews = isNews,
-                IsKids = isKids,
-                IsSports = isSports,
-                HasOverview = hasOverview,
-                HasOfficialRating = hasOfficialRating,
-                HasParentalRating = hasParentalRating,
-                HasSpecialFeature = hasSpecialFeature,
-                HasSubtitles = hasSubtitles,
-                HasThemeSong = hasThemeSong,
-                HasThemeVideo = hasThemeVideo,
-                HasTrailer = hasTrailer,
-                IsHD = isHd,
-                Is4K = is4K,
-                Tags = tags,
-                OfficialRatings = officialRatings,
-                Genres = genres,
-                ArtistIds = artistIds,
-                AlbumArtistIds = albumArtistIds,
-                ContributingArtistIds = contributingArtistIds,
-                GenreIds = genreIds,
-                StudioIds = studioIds,
-                Person = person,
-                PersonIds = personIds,
-                PersonTypes = personTypes,
-                Years = years,
-                ImageTypes = imageTypes,
-                VideoTypes = videoTypes,
-                AdjacentTo = adjacentTo,
-                ItemIds = ids,
-                MinCommunityRating = minCommunityRating,
-                MinCriticRating = minCriticRating,
-                ParentId = parentId ?? Guid.Empty,
-                ParentIndexNumber = parentIndexNumber,
-                EnableTotalRecordCount = enableTotalRecordCount,
-                ExcludeItemIds = excludeItemIds,
-                DtoOptions = dtoOptions,
-                SearchTerm = searchTerm,
-                MinDateLastSaved = minDateLastSaved?.ToUniversalTime(),
-                MinDateLastSavedForUser = minDateLastSavedForUser?.ToUniversalTime(),
-                MinPremiereDate = minPremiereDate?.ToUniversalTime(),
-                MaxPremiereDate = maxPremiereDate?.ToUniversalTime(),
+                MediaTypes = mediaTypes,
+                Limit = limit.HasValue ? limit.Value * 3 : null,
+                ParentId = parentId
             };
 
-            if (ids.Length != 0 || !string.IsNullOrWhiteSpace(searchTerm))
+            var searchResults = await _searchManager.GetSearchResultsAsync(searchProviderQuery, HttpContext.RequestAborted).ConfigureAwait(false);
+            if (searchResults.Count > 0)
             {
-                query.CollapseBoxSetItems = false;
+                searchResultScores = searchResults.ToDictionary(r => r.ItemId, r => r.Score);
+                itemIds = ids.Length > 0
+                    ? ids.Concat(searchResultScores.Keys).Distinct().ToArray()
+                    : searchResultScores.Keys.ToArray();
             }
+        }
 
-            foreach (var filter in filters)
+        var query = new InternalItemsQuery(user)
+        {
+            IsPlayed = isPlayed,
+            MediaTypes = mediaTypes,
+            IncludeItemTypes = includeItemTypes,
+            ExcludeItemTypes = excludeItemTypes,
+            Recursive = recursive ?? false,
+            OrderBy = RequestHelpers.GetOrderBy(sortBy, sortOrder),
+            IsFavorite = isFavorite,
+            Limit = searchResultScores is null ? limit : null,
+            StartIndex = searchResultScores is null ? startIndex : null,
+            IsMissing = isMissing,
+            IsUnaired = isUnaired,
+            CollapseBoxSetItems = collapseBoxSetItems,
+            NameLessThan = nameLessThan,
+            NameStartsWith = nameStartsWith,
+            NameStartsWithOrGreater = nameStartsWithOrGreater,
+            HasImdbId = hasImdbId,
+            IsPlaceHolder = isPlaceHolder,
+            IsLocked = isLocked,
+            MinWidth = minWidth,
+            MinHeight = minHeight,
+            MaxWidth = maxWidth,
+            MaxHeight = maxHeight,
+            Is3D = is3D,
+            HasTvdbId = hasTvdbId,
+            HasTmdbId = hasTmdbId,
+            IsMovie = isMovie,
+            IsSeries = isSeries,
+            IsNews = isNews,
+            IsKids = isKids,
+            IsSports = isSports,
+            HasOverview = hasOverview,
+            HasOfficialRating = hasOfficialRating,
+            HasParentalRating = hasParentalRating,
+            HasSpecialFeature = hasSpecialFeature,
+            HasSubtitles = hasSubtitles,
+            HasThemeSong = hasThemeSong,
+            HasThemeVideo = hasThemeVideo,
+            HasTrailer = hasTrailer,
+            IsHD = isHd,
+            Is4K = is4K,
+            Tags = tags,
+            OfficialRatings = officialRatings,
+            Genres = genres,
+            ArtistIds = artistIds,
+            AlbumArtistIds = albumArtistIds,
+            ContributingArtistIds = contributingArtistIds,
+            GenreIds = genreIds,
+            StudioIds = studioIds,
+            Person = person,
+            PersonIds = personIds,
+            PersonTypes = personTypes,
+            Years = years,
+            ImageTypes = imageTypes,
+            VideoTypes = videoTypes,
+            AdjacentTo = adjacentTo,
+            ItemIds = itemIds,
+            MinCommunityRating = minCommunityRating,
+            MinCriticRating = minCriticRating,
+            ParentId = parentId ?? Guid.Empty,
+            IndexNumber = indexNumber,
+            ParentIndexNumber = parentIndexNumber,
+            EnableTotalRecordCount = enableTotalRecordCount,
+            ExcludeItemIds = excludeItemIds,
+            DtoOptions = dtoOptions,
+            SearchTerm = searchResultScores is null ? searchTerm : null,
+            MinDateLastSaved = minDateLastSaved?.ToUniversalTime(),
+            MinDateLastSavedForUser = minDateLastSavedForUser?.ToUniversalTime(),
+            MinPremiereDate = minPremiereDate?.ToUniversalTime(),
+            MaxPremiereDate = maxPremiereDate?.ToUniversalTime(),
+            AudioLanguages = audioLanguages,
+            SubtitleLanguages = subtitleLanguages,
+            LinkedChildAncestorIds = linkedChildAncestorIds,
+        };
+
+        if (ids.Length != 0 || !string.IsNullOrWhiteSpace(searchTerm))
+        {
+            query.CollapseBoxSetItems = false;
+        }
+
+        if (query.SubtitleLanguages.Count > 0 && query.HasSubtitles.HasValue)
+        {
+            if (query.HasSubtitles.Value)
             {
-                switch (filter)
+                // if we check for specific subtitles we don't need a separate check for subtitle existence
+                query.HasSubtitles = null;
+            }
+            else
+            {
+                // if we search for items without subtitles, we don't need to check for subtitles of a specific language
+                query.SubtitleLanguages = [];
+            }
+        }
+
+        // for filter values that rely on media streams, we need to include alternative and linked versions
+        if (query.HasSubtitles.HasValue
+            || query.SubtitleLanguages.Count > 0
+            || query.AudioLanguages.Count > 0
+            || query.Is3D.HasValue
+            || query.IsHD.HasValue
+            || query.Is4K.HasValue
+            || query.VideoTypes.Length > 0
+        )
+        {
+            query.IncludeOwnedItems = true;
+        }
+
+        query.ApplyFilters(filters);
+
+        // Filter by Series Status
+        if (seriesStatus.Length != 0)
+        {
+            query.SeriesStatuses = seriesStatus;
+        }
+
+        // Exclude Blocked Unrated Items
+        var blockedUnratedItems = user?.GetPreferenceValues<UnratedItem>(PreferenceKind.BlockUnratedItems);
+        if (blockedUnratedItems is not null)
+        {
+            query.BlockUnratedItems = blockedUnratedItems;
+        }
+
+        // ExcludeLocationTypes
+        if (excludeLocationTypes.Any(t => t == LocationType.Virtual))
+        {
+            query.IsVirtualItem = false;
+        }
+
+        if (locationTypes.Length > 0 && locationTypes.Length < 4)
+        {
+            query.IsVirtualItem = locationTypes.Contains(LocationType.Virtual);
+        }
+
+        // Min official rating
+        if (!string.IsNullOrWhiteSpace(minOfficialRating))
+        {
+            query.MinParentalRating = _localization.GetRatingScore(minOfficialRating);
+        }
+
+        // Max official rating
+        if (!string.IsNullOrWhiteSpace(maxOfficialRating))
+        {
+            query.MaxParentalRating = _localization.GetRatingScore(maxOfficialRating);
+        }
+
+        // Artists
+        if (artists.Length != 0)
+        {
+            query.ArtistIds = artists.Select(i =>
+            {
+                try
                 {
-                    case ItemFilter.Dislikes:
-                        query.IsLiked = false;
-                        break;
-                    case ItemFilter.IsFavorite:
-                        query.IsFavorite = true;
-                        break;
-                    case ItemFilter.IsFavoriteOrLikes:
-                        query.IsFavoriteOrLiked = true;
-                        break;
-                    case ItemFilter.IsFolder:
-                        query.IsFolder = true;
-                        break;
-                    case ItemFilter.IsNotFolder:
-                        query.IsFolder = false;
-                        break;
-                    case ItemFilter.IsPlayed:
-                        query.IsPlayed = true;
-                        break;
-                    case ItemFilter.IsResumable:
-                        query.IsResumable = true;
-                        break;
-                    case ItemFilter.IsUnplayed:
-                        query.IsPlayed = false;
-                        break;
-                    case ItemFilter.Likes:
-                        query.IsLiked = true;
-                        break;
+                    return _libraryManager.GetArtist(i, new DtoOptions(false));
                 }
-            }
-
-            // Filter by Series Status
-            if (seriesStatus.Length != 0)
-            {
-                query.SeriesStatuses = seriesStatus;
-            }
-
-            // Exclude Blocked Unrated Items
-            var blockedUnratedItems = user?.GetPreferenceValues<UnratedItem>(PreferenceKind.BlockUnratedItems);
-            if (blockedUnratedItems is not null)
-            {
-                query.BlockUnratedItems = blockedUnratedItems;
-            }
-
-            // ExcludeLocationTypes
-            if (excludeLocationTypes.Any(t => t == LocationType.Virtual))
-            {
-                query.IsVirtualItem = false;
-            }
-
-            if (locationTypes.Length > 0 && locationTypes.Length < 4)
-            {
-                query.IsVirtualItem = locationTypes.Contains(LocationType.Virtual);
-            }
-
-            // Min official rating
-            if (!string.IsNullOrWhiteSpace(minOfficialRating))
-            {
-                query.MinParentalRating = _localization.GetRatingLevel(minOfficialRating);
-            }
-
-            // Max official rating
-            if (!string.IsNullOrWhiteSpace(maxOfficialRating))
-            {
-                query.MaxParentalRating = _localization.GetRatingLevel(maxOfficialRating);
-            }
-
-            // Artists
-            if (artists.Length != 0)
-            {
-                query.ArtistIds = artists.Select(i =>
+                catch
                 {
-                    try
-                    {
-                        return _libraryManager.GetArtist(i, new DtoOptions(false));
-                    }
-                    catch
-                    {
-                        return null;
-                    }
-                }).Where(i => i is not null).Select(i => i!.Id).ToArray();
-            }
-
-            // ExcludeArtistIds
-            if (excludeArtistIds.Length != 0)
-            {
-                query.ExcludeArtistIds = excludeArtistIds;
-            }
-
-            if (albumIds.Length != 0)
-            {
-                query.AlbumIds = albumIds;
-            }
-
-            // Albums
-            if (albums.Length != 0)
-            {
-                query.AlbumIds = albums.SelectMany(i =>
-                {
-                    return _libraryManager.GetItemIds(new InternalItemsQuery { IncludeItemTypes = new[] { BaseItemKind.MusicAlbum }, Name = i, Limit = 1 });
-                }).ToArray();
-            }
-
-            // Studios
-            if (studios.Length != 0)
-            {
-                query.StudioIds = studios.Select(i =>
-                {
-                    try
-                    {
-                        return _libraryManager.GetStudio(i);
-                    }
-                    catch
-                    {
-                        return null;
-                    }
-                }).Where(i => i is not null).Select(i => i!.Id).ToArray();
-            }
-
-            // Apply default sorting if none requested
-            if (query.OrderBy.Count == 0)
-            {
-                // Albums by artist
-                if (query.ArtistIds.Length > 0 && query.IncludeItemTypes.Length == 1 && query.IncludeItemTypes[0] == BaseItemKind.MusicAlbum)
-                {
-                    query.OrderBy = new[] { (ItemSortBy.ProductionYear, SortOrder.Descending), (ItemSortBy.SortName, SortOrder.Ascending) };
+                    return null;
                 }
-            }
+            }).Where(i => i is not null).Select(i => i!.Id).ToArray();
+        }
 
-            query.Parent = null;
+        // ExcludeArtistIds
+        if (excludeArtistIds.Length != 0)
+        {
+            query.ExcludeArtistIds = excludeArtistIds;
+        }
+
+        if (albumIds.Length != 0)
+        {
+            query.AlbumIds = albumIds;
+        }
+
+        // Albums
+        if (albums.Length != 0)
+        {
+            query.AlbumIds = albums.SelectMany(i =>
+            {
+                return _libraryManager.GetItemIds(new InternalItemsQuery { IncludeItemTypes = [BaseItemKind.MusicAlbum], Name = i, Limit = 1 });
+            }).ToArray();
+        }
+
+        // Studios
+        if (studios.Length != 0)
+        {
+            query.StudioIds = studios.Select(i =>
+            {
+                try
+                {
+                    return _libraryManager.GetStudio(i);
+                }
+                catch
+                {
+                    return null;
+                }
+            }).Where(i => i is not null).Select(i => i!.Id).ToArray();
+        }
+
+        // Apply default sorting if none requested
+        if (query.OrderBy.Count == 0)
+        {
+            // Albums by artist
+            if (query.ArtistIds.Length > 0 && query.IncludeItemTypes.Length == 1 && query.IncludeItemTypes[0] == BaseItemKind.MusicAlbum)
+            {
+                query.OrderBy = [(ItemSortBy.ProductionYear, SortOrder.Descending), (ItemSortBy.SortName, SortOrder.Ascending)];
+            }
+        }
+
+        query.Parent = null;
+
+        // At the user root an unfiltered, non-recursive request is a plain listing of the user's libraries
+        if ((recursive.HasValue && recursive.Value) || ids.Length != 0 || item is not UserRootFolder || query.HasFilters)
+        {
+            // folder.GetItems applies user-access filtering via the InternalItemsQuery's User.
             result = folder.GetItems(query);
+            if (searchResultScores is not null && searchResultScores.Count > 0)
+            {
+                var orderedItems = result.Items
+                    .OrderByDescending(item => searchResultScores.GetValueOrDefault(item.Id, 0f))
+                    .ThenBy(item => item.SortName)
+                    .ToArray();
+
+                var totalCount = orderedItems.Length;
+                if (startIndex.HasValue && startIndex.Value > 0)
+                {
+                    orderedItems = orderedItems.Skip(startIndex.Value).ToArray();
+                }
+
+                if (limit.HasValue)
+                {
+                    orderedItems = orderedItems.Take(limit.Value).ToArray();
+                }
+
+                return new QueryResult<BaseItemDto>(
+                    startIndex,
+                    totalCount,
+                    _dtoService.GetBaseItemDtos(orderedItems, dtoOptions, user));
+            }
         }
         else
         {
@@ -514,7 +626,7 @@ public class ItemsController : BaseJellyfinApiController
         return new QueryResult<BaseItemDto>(
             startIndex,
             result.TotalRecordCount,
-            _dtoService.GetBaseItemDtos(result.Items, dtoOptions, user));
+            _dtoService.GetBaseItemDtos(result.Items, dtoOptions, user, skipVisibilityCheck: true));
     }
 
     /// <summary>
@@ -607,8 +719,10 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="enableImages">Optional, include image information in output.</param>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the items.</returns>
     [HttpGet("Users/{userId}/Items")]
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<QueryResult<BaseItemDto>> GetItemsByUserId(
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetItemsByUserIdLegacy(
         [FromRoute] Guid userId,
         [FromQuery] string? maxOfficialRating,
         [FromQuery] bool? hasThemeSong,
@@ -621,8 +735,8 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] bool? hasParentalRating,
         [FromQuery] bool? isHd,
         [FromQuery] bool? is4K,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] LocationType[] locationTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] LocationType[] excludeLocationTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] LocationType[] locationTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] LocationType[] excludeLocationTypes,
         [FromQuery] bool? isMissing,
         [FromQuery] bool? isUnaired,
         [FromQuery] double? minCommunityRating,
@@ -640,42 +754,42 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] bool? isNews,
         [FromQuery] bool? isKids,
         [FromQuery] bool? isSports,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeItemIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeItemIds,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] bool? recursive,
         [FromQuery] string? searchTerm,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SortOrder[] sortOrder,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[] sortOrder,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] excludeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] includeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFilter[] filters,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFilter[] filters,
         [FromQuery] bool? isFavorite,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] mediaTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] imageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] sortBy,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] imageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[] sortBy,
         [FromQuery] bool? isPlayed,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] genres,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] officialRatings,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] tags,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] int[] years,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] genres,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] officialRatings,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] tags,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] int[] years,
         [FromQuery] bool? enableUserData,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
         [FromQuery] string? person,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] personIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] personTypes,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] studios,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] artists,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] artistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] albumArtistIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] contributingArtistIds,
-        [FromQuery, ModelBinder(typeof(PipeDelimitedArrayModelBinder))] string[] albums,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] albumIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] ids,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] VideoType[] videoTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] personIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] personTypes,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] studios,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] artists,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] artistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] albumArtistIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] contributingArtistIds,
+        [FromQuery, ModelBinder(typeof(PipeDelimitedCollectionModelBinder))] string[] albums,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] albumIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] VideoType[] videoTypes,
         [FromQuery] string? minOfficialRating,
         [FromQuery] bool? isLocked,
         [FromQuery] bool? isPlaceHolder,
@@ -686,16 +800,15 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery] int? maxWidth,
         [FromQuery] int? maxHeight,
         [FromQuery] bool? is3D,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] SeriesStatus[] seriesStatus,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SeriesStatus[] seriesStatus,
         [FromQuery] string? nameStartsWithOrGreater,
         [FromQuery] string? nameStartsWith,
         [FromQuery] string? nameLessThan,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] studioIds,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] genreIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] studioIds,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] genreIds,
         [FromQuery] bool enableTotalRecordCount = true,
         [FromQuery] bool? enableImages = true)
-    {
-        return GetItems(
+        => await GetItems(
             userId,
             maxOfficialRating,
             hasThemeSong,
@@ -704,6 +817,7 @@ public class ItemsController : BaseJellyfinApiController
             hasSpecialFeature,
             hasTrailer,
             adjacentTo,
+            null,
             parentIndexNumber,
             hasParentalRating,
             isHd,
@@ -779,8 +893,115 @@ public class ItemsController : BaseJellyfinApiController
             nameLessThan,
             studioIds,
             genreIds,
+            [],
+            [],
             enableTotalRecordCount,
-            enableImages);
+            enableImages).ConfigureAwait(false);
+
+    /// <summary>
+    /// Gets items based on a query.
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <param name="startIndex">The start index.</param>
+    /// <param name="limit">The item limit.</param>
+    /// <param name="searchTerm">The search term.</param>
+    /// <param name="parentId">Specify this to localize the search to a specific item or folder. Omit to use the root.</param>
+    /// <param name="fields">Optional. Specify additional fields of information to return in the output. This allows multiple, comma delimited. Options: Budget, Chapters, DateCreated, Genres, HomePageUrl, IndexOptions, MediaStreams, Overview, ParentId, Path, People, ProviderIds, PrimaryImageAspectRatio, Revenue, SortName, Studios, Taglines.</param>
+    /// <param name="mediaTypes">Optional. Filter by MediaType. Allows multiple, comma delimited.</param>
+    /// <param name="enableUserData">Optional. Include user data.</param>
+    /// <param name="imageTypeLimit">Optional. The max number of images to return, per image type.</param>
+    /// <param name="enableImageTypes">Optional. The image types to include in the output.</param>
+    /// <param name="excludeItemTypes">Optional. If specified, results will be filtered based on item type. This allows multiple, comma delimited.</param>
+    /// <param name="includeItemTypes">Optional. If specified, results will be filtered based on the item type. This allows multiple, comma delimited.</param>
+    /// <param name="enableTotalRecordCount">Optional. Enable the total record count.</param>
+    /// <param name="enableImages">Optional. Include image information in output.</param>
+    /// <param name="excludeActiveSessions">Optional. Whether to exclude the currently active sessions.</param>
+    /// <response code="200">Items returned.</response>
+    /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the items that are resumable.</returns>
+    [HttpGet("UserItems/Resume")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<QueryResult<BaseItemDto>> GetResumeItems(
+        [FromQuery] Guid? userId,
+        [FromQuery] int? startIndex,
+        [FromQuery] int? limit,
+        [FromQuery] string? searchTerm,
+        [FromQuery] Guid? parentId,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
+        [FromQuery] bool? enableUserData,
+        [FromQuery] int? imageTypeLimit,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery] bool enableTotalRecordCount = true,
+        [FromQuery] bool? enableImages = true,
+        [FromQuery] bool excludeActiveSessions = false)
+    {
+        var requestUserId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(requestUserId);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        var parentIdGuid = parentId ?? Guid.Empty;
+        var dtoOptions = new DtoOptions { Fields = fields }
+            .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
+
+        var ancestorIds = Array.Empty<Guid>();
+
+        var excludeFolderIds = user.GetPreferenceValues<Guid>(PreferenceKind.LatestItemExcludes);
+        if (parentIdGuid.IsEmpty() && excludeFolderIds.Length > 0)
+        {
+            ancestorIds = _libraryManager.GetUserRootFolder().GetChildren(user, true)
+                .Where(i => i is Folder)
+                .Where(i => !excludeFolderIds.Contains(i.Id))
+                .Select(i => i.Id)
+                .ToArray();
+        }
+
+        var excludeItemIds = Array.Empty<Guid>();
+        if (excludeActiveSessions)
+        {
+            // NowPlayingItem.Id is the displayed/primary id, but resume queries surface the actually-played
+            // alternate version's own id. Expand each active session to every version id so an in-progress
+            // alternate is excluded too, instead of leaking back into the resume list.
+            excludeItemIds = _sessionManager.Sessions
+                .Where(s => s.UserId.Equals(requestUserId) && s.NowPlayingItem is not null)
+                .SelectMany(s => _libraryManager.GetItemById(s.NowPlayingItem.Id) is Video video
+                    ? video.GetAllVersions().Select(v => v.Id)
+                    : [s.NowPlayingItem.Id])
+                .Distinct()
+                .ToArray();
+        }
+
+        var itemsResult = _libraryManager.GetItemsResult(new InternalItemsQuery(user)
+        {
+            OrderBy = [(ItemSortBy.DatePlayed, SortOrder.Descending)],
+            IsResumable = true,
+            StartIndex = startIndex,
+            Limit = limit,
+            ParentId = parentIdGuid,
+            Recursive = true,
+            DtoOptions = dtoOptions,
+            MediaTypes = mediaTypes,
+            IsVirtualItem = false,
+            CollapseBoxSetItems = false,
+            IncludeOwnedItems = true,
+            EnableTotalRecordCount = enableTotalRecordCount,
+            AncestorIds = ancestorIds,
+            IncludeItemTypes = includeItemTypes,
+            ExcludeItemTypes = excludeItemTypes,
+            SearchTerm = searchTerm,
+            ExcludeItemIds = excludeItemIds
+        });
+
+        var returnItems = _dtoService.GetBaseItemDtos(itemsResult.Items, dtoOptions, user);
+
+        return new QueryResult<BaseItemDto>(
+            startIndex,
+            itemsResult.TotalRecordCount,
+            returnItems);
     }
 
     /// <summary>
@@ -804,81 +1025,155 @@ public class ItemsController : BaseJellyfinApiController
     /// <response code="200">Items returned.</response>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the items that are resumable.</returns>
     [HttpGet("Users/{userId}/Items/Resume")]
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<QueryResult<BaseItemDto>> GetResumeItems(
+    public ActionResult<QueryResult<BaseItemDto>> GetResumeItemsLegacy(
         [FromRoute, Required] Guid userId,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] string? searchTerm,
         [FromQuery] Guid? parentId,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] string[] mediaTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] MediaType[] mediaTypes,
         [FromQuery] bool? enableUserData,
         [FromQuery] int? imageTypeLimit,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ImageType[] enableImageTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] excludeItemTypes,
-        [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] BaseItemKind[] includeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ImageType[] enableImageTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] excludeItemTypes,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] BaseItemKind[] includeItemTypes,
         [FromQuery] bool enableTotalRecordCount = true,
         [FromQuery] bool? enableImages = true,
         [FromQuery] bool excludeActiveSessions = false)
+    => GetResumeItems(
+        userId,
+        startIndex,
+        limit,
+        searchTerm,
+        parentId,
+        fields,
+        mediaTypes,
+        enableUserData,
+        imageTypeLimit,
+        enableImageTypes,
+        excludeItemTypes,
+        includeItemTypes,
+        enableTotalRecordCount,
+        enableImages,
+        excludeActiveSessions);
+
+    /// <summary>
+    /// Get Item User Data.
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <param name="itemId">The item id.</param>
+    /// <response code="200">return item user data.</response>
+    /// <response code="404">Item is not found.</response>
+    /// <returns>Return <see cref="UserItemDataDto"/>.</returns>
+    [HttpGet("UserItems/{itemId}/UserData")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto?> GetItemUserData(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId)
     {
-        var user = _userManager.GetUserById(userId);
+        var requestUserId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(requestUserId);
         if (user is null)
         {
             return NotFound();
         }
 
-        var parentIdGuid = parentId ?? Guid.Empty;
-        var dtoOptions = new DtoOptions { Fields = fields }
-            .AddClientFields(User)
-            .AddAdditionalDtoOptions(enableImages, enableUserData, imageTypeLimit, enableImageTypes);
-
-        var ancestorIds = Array.Empty<Guid>();
-
-        var excludeFolderIds = user.GetPreferenceValues<Guid>(PreferenceKind.LatestItemExcludes);
-        if (parentIdGuid.Equals(default) && excludeFolderIds.Length > 0)
+        if (!RequestHelpers.AssertCanUpdateUser(User, user, true))
         {
-            ancestorIds = _libraryManager.GetUserRootFolder().GetChildren(user, true)
-                .Where(i => i is Folder)
-                .Where(i => !excludeFolderIds.Contains(i.Id))
-                .Select(i => i.Id)
-                .ToArray();
+            return StatusCode(StatusCodes.Status403Forbidden, "User is not allowed to view this item user data.");
         }
 
-        var excludeItemIds = Array.Empty<Guid>();
-        if (excludeActiveSessions)
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
         {
-            excludeItemIds = _sessionManager.Sessions
-                .Where(s => s.UserId.Equals(userId) && s.NowPlayingItem is not null)
-                .Select(s => s.NowPlayingItem.Id)
-                .ToArray();
+            return NotFound();
         }
 
-        var itemsResult = _libraryManager.GetItemsResult(new InternalItemsQuery(user)
-        {
-            OrderBy = new[] { (ItemSortBy.DatePlayed, SortOrder.Descending) },
-            IsResumable = true,
-            StartIndex = startIndex,
-            Limit = limit,
-            ParentId = parentIdGuid,
-            Recursive = true,
-            DtoOptions = dtoOptions,
-            MediaTypes = mediaTypes,
-            IsVirtualItem = false,
-            CollapseBoxSetItems = false,
-            EnableTotalRecordCount = enableTotalRecordCount,
-            AncestorIds = ancestorIds,
-            IncludeItemTypes = includeItemTypes,
-            ExcludeItemTypes = excludeItemTypes,
-            SearchTerm = searchTerm,
-            ExcludeItemIds = excludeItemIds
-        });
-
-        var returnItems = _dtoService.GetBaseItemDtos(itemsResult.Items, dtoOptions, user);
-
-        return new QueryResult<BaseItemDto>(
-            startIndex,
-            itemsResult.TotalRecordCount,
-            returnItems);
+        return _userDataRepository.GetUserDataDto(item, user);
     }
+
+    /// <summary>
+    /// Get Item User Data.
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <param name="itemId">The item id.</param>
+    /// <response code="200">return item user data.</response>
+    /// <response code="404">Item is not found.</response>
+    /// <returns>Return <see cref="UserItemDataDto"/>.</returns>
+    [HttpGet("Users/{userId}/Items/{itemId}/UserData")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto?> GetItemUserDataLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId)
+        => GetItemUserData(userId, itemId);
+
+    /// <summary>
+    /// Update Item User Data.
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userDataDto">New user data object.</param>
+    /// <response code="200">return updated user item data.</response>
+    /// <response code="404">Item is not found.</response>
+    /// <returns>Return <see cref="UserItemDataDto"/>.</returns>
+    [HttpPost("UserItems/{itemId}/UserData")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [Tags("UserData")]
+    public ActionResult<UserItemDataDto?> UpdateItemUserData(
+        [FromQuery] Guid? userId,
+        [FromRoute, Required] Guid itemId,
+        [FromBody, Required] UpdateUserItemDataDto userDataDto)
+    {
+        var requestUserId = RequestHelpers.GetUserId(User, userId);
+        var user = _userManager.GetUserById(requestUserId);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        if (!RequestHelpers.AssertCanUpdateUser(User, user, true))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, "User is not allowed to update this item user data.");
+        }
+
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        _userDataRepository.SaveUserData(user, item, userDataDto, UserDataSaveReason.UpdateUserData);
+
+        return _userDataRepository.GetUserDataDto(item, user);
+    }
+
+    /// <summary>
+    /// Update Item User Data.
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userDataDto">New user data object.</param>
+    /// <response code="200">return updated user item data.</response>
+    /// <response code="404">Item is not found.</response>
+    /// <returns>Return <see cref="UserItemDataDto"/>.</returns>
+    [HttpPost("Users/{userId}/Items/{itemId}/UserData")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [Obsolete("Kept for backwards compatibility")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public ActionResult<UserItemDataDto?> UpdateItemUserDataLegacy(
+        [FromRoute, Required] Guid userId,
+        [FromRoute, Required] Guid itemId,
+        [FromBody, Required] UpdateUserItemDataDto userDataDto)
+        => UpdateItemUserData(userId, itemId, userDataDto);
 }

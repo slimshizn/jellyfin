@@ -4,10 +4,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Text.Json.Serialization;
-using Jellyfin.Data.Entities;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Querying;
 
@@ -20,7 +24,7 @@ namespace MediaBrowser.Controller.Entities.Movies
     {
         public BoxSet()
         {
-            DisplayOrder = ItemSortBy.PremiereDate;
+            DisplayOrder = "PremiereDate";
         }
 
         [JsonIgnore]
@@ -34,9 +38,7 @@ namespace MediaBrowser.Controller.Entities.Movies
 
         /// <inheritdoc />
         [JsonIgnore]
-        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras()
-            .Where(extra => extra.ExtraType == Model.Entities.ExtraType.Trailer)
-            .ToArray();
+        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras([Model.Entities.ExtraType.Trailer]).ToArray();
 
         /// <summary>
         /// Gets or sets the display order.
@@ -88,10 +90,10 @@ namespace MediaBrowser.Controller.Entities.Movies
                 return base.GetNonCachedChildren(directoryService);
             }
 
-            return Enumerable.Empty<BaseItem>();
+            return [];
         }
 
-        protected override List<BaseItem> LoadChildren()
+        protected override IReadOnlyList<BaseItem> LoadChildren()
         {
             if (IsLegacyBoxSet)
             {
@@ -99,7 +101,7 @@ namespace MediaBrowser.Controller.Entities.Movies
             }
 
             // Save a trip to the database
-            return new List<BaseItem>();
+            return [];
         }
 
         public override bool IsAuthorizedToDelete(User user, List<Folder> allCollectionFolders)
@@ -112,37 +114,37 @@ namespace MediaBrowser.Controller.Entities.Movies
             return true;
         }
 
-        public override List<BaseItem> GetChildren(User user, bool includeLinkedChildren, InternalItemsQuery query)
+        private IEnumerable<BaseItem> Sort(IEnumerable<BaseItem> items, User user)
         {
-            var children = base.GetChildren(user, includeLinkedChildren, query);
-
-            if (string.Equals(DisplayOrder, ItemSortBy.SortName, StringComparison.OrdinalIgnoreCase))
+            if (!Enum.TryParse<ItemSortBy>(DisplayOrder, out var sortBy))
             {
-                // Sort by name
-                return LibraryManager.Sort(children, user, new[] { ItemSortBy.SortName }, SortOrder.Ascending).ToList();
+                sortBy = ItemSortBy.PremiereDate;
             }
 
-            if (string.Equals(DisplayOrder, ItemSortBy.PremiereDate, StringComparison.OrdinalIgnoreCase))
+            if (sortBy == ItemSortBy.Default)
             {
-                // Sort by release date
-                return LibraryManager.Sort(children, user, new[] { ItemSortBy.ProductionYear, ItemSortBy.PremiereDate, ItemSortBy.SortName }, SortOrder.Ascending).ToList();
+                return items;
             }
 
-            // Default sorting
-            return LibraryManager.Sort(children, user, new[] { ItemSortBy.ProductionYear, ItemSortBy.PremiereDate, ItemSortBy.SortName }, SortOrder.Ascending).ToList();
+            return LibraryManager.Sort(items, user, new[] { sortBy }, SortOrder.Ascending);
         }
 
-        public override IEnumerable<BaseItem> GetRecursiveChildren(User user, InternalItemsQuery query)
+        public override IReadOnlyList<BaseItem> GetChildren(User user, bool includeLinkedChildren, InternalItemsQuery query)
         {
-            var children = base.GetRecursiveChildren(user, query);
+            var children = base.GetChildren(user, includeLinkedChildren, query);
+            return Sort(children, user).ToArray();
+        }
 
-            if (string.Equals(DisplayOrder, ItemSortBy.PremiereDate, StringComparison.OrdinalIgnoreCase))
-            {
-                // Sort by release date
-                return LibraryManager.Sort(children, user, new[] { ItemSortBy.ProductionYear, ItemSortBy.PremiereDate, ItemSortBy.SortName }, SortOrder.Ascending).ToList();
-            }
+        public override IReadOnlyList<BaseItem> GetChildren(User user, bool includeLinkedChildren, out int totalItemCount, InternalItemsQuery query = null)
+        {
+            var children = base.GetChildren(user, includeLinkedChildren, out totalItemCount, query);
+            return Sort(children, user).ToArray();
+        }
 
-            return children;
+        public override IReadOnlyList<BaseItem> GetRecursiveChildren(User user, InternalItemsQuery query, out int totalCount)
+        {
+            var children = base.GetRecursiveChildren(user, query, out totalCount);
+            return Sort(children, user).ToArray();
         }
 
         public BoxSetInfo GetLookupInfo()
@@ -150,32 +152,82 @@ namespace MediaBrowser.Controller.Entities.Movies
             return GetItemLookupInfo<BoxSetInfo>();
         }
 
-        public override bool IsVisible(User user)
+        public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)
         {
             if (IsLegacyBoxSet)
             {
-                return base.IsVisible(user);
+                return base.IsVisible(user, skipAllowedTagsCheck);
             }
 
-            if (base.IsVisible(user))
+            if (!IsParentalAllowed(user, skipAllowedTagsCheck))
             {
-                if (LinkedChildren.Length == 0)
-                {
-                    return true;
-                }
-
-                var userLibraryFolderIds = GetLibraryFolderIds(user);
-                var libraryFolderIds = LibraryFolderIds ?? GetLibraryFolderIds();
-
-                if (libraryFolderIds.Length == 0)
-                {
-                    return true;
-                }
-
-                return userLibraryFolderIds.Any(i => libraryFolderIds.Contains(i));
+                return false;
             }
 
-            return false;
+            if (LinkedChildren.Length == 0)
+            {
+                return true;
+            }
+
+            List<BaseItem> linkedItems = null;
+            var libraryFolderIds = LibraryFolderIds;
+            if (libraryFolderIds is null)
+            {
+                linkedItems = GetLinkedChildren(DtoOptions.StoredColumnsOnly);
+                libraryFolderIds = GetLibraryFolderIds(linkedItems);
+            }
+
+            if (libraryFolderIds.Length == 0)
+            {
+                return true;
+            }
+
+            var userLibraryFolderIds = GetLibraryFolderIds(user);
+
+            if (!userLibraryFolderIds.Any(i => libraryFolderIds.Contains(i)))
+            {
+                return false;
+            }
+
+            // If user has parental controls, hide the BoxSet when all children are restricted
+            if (user.MaxParentalRatingScore.HasValue)
+            {
+                linkedItems ??= GetLinkedChildren(DtoOptions.StoredColumnsOnly);
+                if (linkedItems.Count > 0 && linkedItems.All(child => !child.IsParentalAllowed(user, true)))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public override void MarkPlayed(User user, DateTime? datePlayed, bool resetPosition)
+        {
+            if (IsLegacyBoxSet)
+            {
+                base.MarkPlayed(user, datePlayed, resetPosition);
+                return;
+            }
+
+            foreach (var item in GetLinkedChildren(user))
+            {
+                item.MarkPlayed(user, datePlayed, resetPosition);
+            }
+        }
+
+        public override void MarkUnplayed(User user)
+        {
+            if (IsLegacyBoxSet)
+            {
+                base.MarkUnplayed(user);
+                return;
+            }
+
+            foreach (var item in GetLinkedChildren(user))
+            {
+                item.MarkUnplayed(user);
+            }
         }
 
         public override bool IsVisibleStandalone(User user)
@@ -197,10 +249,19 @@ namespace MediaBrowser.Controller.Entities.Movies
 
         public Guid[] GetLibraryFolderIds()
         {
-            var expandedFolders = new List<Guid>();
+            return GetLibraryFolderIds(GetLinkedChildren(DtoOptions.StoredColumnsOnly));
+        }
 
-            return FlattenItems(this, expandedFolders)
-                .SelectMany(i => LibraryManager.GetCollectionFolders(i))
+        private Guid[] GetLibraryFolderIds(IEnumerable<BaseItem> linkedChildren)
+        {
+            // Seeded with this box set so a cycle through a nested collection terminates.
+            var expandedFolders = new List<Guid> { Id };
+
+            // The user root children are the same for every item.
+            var rootChildren = LibraryManager.GetUserRootFolder().Children.OfType<Folder>().ToList();
+
+            return FlattenItems(linkedChildren, expandedFolders)
+                .SelectMany(i => LibraryManager.GetCollectionFolders(i, rootChildren))
                 .Select(i => i.Id)
                 .Distinct()
                 .ToArray();
@@ -220,13 +281,13 @@ namespace MediaBrowser.Controller.Entities.Movies
                 {
                     expandedFolders.Add(item.Id);
 
-                    return FlattenItems(boxset.GetLinkedChildren(), expandedFolders);
+                    return FlattenItems(boxset.GetLinkedChildren(DtoOptions.StoredColumnsOnly), expandedFolders);
                 }
 
-                return Array.Empty<BaseItem>();
+                return [];
             }
 
-            return new[] { item };
+            return [item];
         }
     }
 }

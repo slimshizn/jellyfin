@@ -1,10 +1,7 @@
-﻿using System;
 using System.Collections.Generic;
-using System.Security.Claims;
-using Jellyfin.Extensions;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Querying;
 
 namespace Jellyfin.Api.Extensions;
 
@@ -14,62 +11,34 @@ namespace Jellyfin.Api.Extensions;
 public static class DtoExtensions
 {
     /// <summary>
-    /// Add additional fields depending on client.
+    /// Gets the BaseItemKind values associated with the specified CollectionType.
     /// </summary>
-    /// <remarks>
-    /// Use in place of GetDtoOptions.
-    /// Legacy order: 2.
-    /// </remarks>
-    /// <param name="dtoOptions">DtoOptions object.</param>
-    /// <param name="user">Current claims principal.</param>
-    /// <returns>Modified DtoOptions object.</returns>
-    internal static DtoOptions AddClientFields(
-        this DtoOptions dtoOptions, ClaimsPrincipal user)
+    /// <param name="collectionType">The collection type to map to BaseItemKind values.</param>
+    /// <returns>An array of BaseItemKind values that correspond to the collection type.</returns>
+    public static BaseItemKind[] GetBaseItemKindsForCollectionType(CollectionType? collectionType)
     {
-        dtoOptions.Fields ??= Array.Empty<ItemFields>();
-
-        string? client = user.GetClient();
-
-        // No client in claim
-        if (string.IsNullOrEmpty(client))
+        switch (collectionType)
         {
-            return dtoOptions;
+            case CollectionType.movies:
+                return [BaseItemKind.Movie];
+            case CollectionType.tvshows:
+                return [BaseItemKind.Series];
+            case CollectionType.music:
+                return [BaseItemKind.MusicAlbum];
+            case CollectionType.musicvideos:
+                return [BaseItemKind.MusicVideo];
+            case CollectionType.books:
+                return [BaseItemKind.Book, BaseItemKind.AudioBook];
+            case CollectionType.boxsets:
+                return [BaseItemKind.BoxSet];
+            case CollectionType.homevideos:
+            case CollectionType.photos:
+                return [BaseItemKind.Video, BaseItemKind.Photo];
+            case CollectionType.folders:
+                return [];
+            default:
+                return [BaseItemKind.Video, BaseItemKind.Audio, BaseItemKind.Photo, BaseItemKind.Movie, BaseItemKind.Series];
         }
-
-        if (!dtoOptions.ContainsField(ItemFields.RecursiveItemCount))
-        {
-            if (client.IndexOf("kodi", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("wmc", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("media center", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("classic", StringComparison.OrdinalIgnoreCase) != -1)
-            {
-                int oldLen = dtoOptions.Fields.Count;
-                var arr = new ItemFields[oldLen + 1];
-                dtoOptions.Fields.CopyTo(arr, 0);
-                arr[oldLen] = ItemFields.RecursiveItemCount;
-                dtoOptions.Fields = arr;
-            }
-        }
-
-        if (!dtoOptions.ContainsField(ItemFields.ChildCount))
-        {
-            if (client.IndexOf("kodi", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("wmc", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("media center", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("classic", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("roku", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("samsung", StringComparison.OrdinalIgnoreCase) != -1 ||
-                client.IndexOf("androidtv", StringComparison.OrdinalIgnoreCase) != -1)
-            {
-                int oldLen = dtoOptions.Fields.Count;
-                var arr = new ItemFields[oldLen + 1];
-                dtoOptions.Fields.CopyTo(arr, 0);
-                arr[oldLen] = ItemFields.ChildCount;
-                dtoOptions.Fields = arr;
-            }
-        }
-
-        return dtoOptions;
     }
 
     /// <summary>

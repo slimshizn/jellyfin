@@ -1,7 +1,8 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities.Security;
+using Jellyfin.Database.Implementations;
+using Jellyfin.Database.Implementations.Entities.Security;
 using MediaBrowser.Controller.Security;
 using Microsoft.EntityFrameworkCore;
 
@@ -22,14 +23,25 @@ namespace Jellyfin.Server.Implementations.Security
         }
 
         /// <inheritdoc />
-        public async Task CreateApiKey(string name)
+        public async Task<AuthenticationInfo> CreateApiKey(string name)
         {
             var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
             await using (dbContext.ConfigureAwait(false))
             {
-                dbContext.ApiKeys.Add(new ApiKey(name));
+                var apiKey = new ApiKey(name);
+                dbContext.ApiKeys.Add(apiKey);
 
                 await dbContext.SaveChangesAsync().ConfigureAwait(false);
+
+                return new AuthenticationInfo
+                {
+                    AppName = apiKey.Name,
+                    AccessToken = apiKey.AccessToken,
+                    DateCreated = apiKey.DateCreated,
+                    DeviceId = string.Empty,
+                    DeviceName = string.Empty,
+                    AppVersion = string.Empty
+                };
             }
         }
 
@@ -58,19 +70,10 @@ namespace Jellyfin.Server.Implementations.Security
             var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
             await using (dbContext.ConfigureAwait(false))
             {
-                var key = await dbContext.ApiKeys
+                await dbContext.ApiKeys
                     .Where(apiKey => apiKey.AccessToken == accessToken)
-                    .FirstOrDefaultAsync()
+                    .ExecuteDeleteAsync()
                     .ConfigureAwait(false);
-
-                if (key is null)
-                {
-                    return;
-                }
-
-                dbContext.Remove(key);
-
-                await dbContext.SaveChangesAsync().ConfigureAwait(false);
             }
         }
     }

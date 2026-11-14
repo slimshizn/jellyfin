@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Threading.Tasks;
+using Jellyfin.Extensions;
 
 namespace MediaBrowser.Controller.ClientEvent
 {
@@ -21,11 +22,21 @@ namespace MediaBrowser.Controller.ClientEvent
         /// <inheritdoc />
         public async Task<string> WriteDocumentAsync(string clientName, string clientVersion, Stream fileContents)
         {
-            var fileName = $"upload_{clientName}_{clientVersion}_{DateTime.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}.log";
+            var safeClientName = PathHelper.GetSafeLeafFileName(clientName) ?? "unknown-client";
+            var safeClientVersion = PathHelper.GetSafeLeafFileName(clientVersion) ?? "unknown-version";
+            var fileName = $"upload_{safeClientName}_{safeClientVersion}_{DateTime.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}.log";
             var logFilePath = Path.Combine(_applicationPaths.LogDirectoryPath, fileName);
-            await using var fileStream = new FileStream(logFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            await fileContents.CopyToAsync(fileStream).ConfigureAwait(false);
-            return fileName;
+            if (!PathHelper.IsContainedIn(_applicationPaths.LogDirectoryPath, logFilePath))
+            {
+                throw new ArgumentException("Path resolved to filename not in log directory");
+            }
+
+            var fileStream = new FileStream(logFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            await using (fileStream.ConfigureAwait(false))
+            {
+                await fileContents.CopyToAsync(fileStream).ConfigureAwait(false);
+                return fileName;
+            }
         }
     }
 }

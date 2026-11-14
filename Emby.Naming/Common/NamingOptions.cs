@@ -21,8 +21,8 @@ namespace Emby.Naming.Common
         /// </summary>
         public NamingOptions()
         {
-            VideoFileExtensions = new[]
-            {
+            VideoFileExtensions =
+            [
                 ".001",
                 ".3g2",
                 ".3gp",
@@ -57,7 +57,6 @@ namespace Emby.Naming.Common
                 ".nrg",
                 ".nsv",
                 ".nuv",
-                ".ogg",
                 ".ogm",
                 ".ogv",
                 ".pva",
@@ -77,10 +76,10 @@ namespace Emby.Naming.Common
                 ".wmv",
                 ".wtv",
                 ".xvid"
-            };
+            ];
 
-            VideoFlagDelimiters = new[]
-            {
+            VideoFlagDelimiters =
+            [
                 '(',
                 ')',
                 '-',
@@ -88,15 +87,15 @@ namespace Emby.Naming.Common
                 '_',
                 '[',
                 ']'
-            };
+            ];
 
-            StubFileExtensions = new[]
-            {
+            StubFileExtensions =
+            [
                 ".disc"
-            };
+            ];
 
-            StubTypes = new[]
-            {
+            StubTypes =
+            [
                 new StubTypeRule(
                     stubType: "dvd",
                     token: "dvd"),
@@ -136,32 +135,32 @@ namespace Emby.Naming.Common
                 new StubTypeRule(
                     stubType: "tv",
                     token: "DSR")
-            };
+            ];
 
-            VideoFileStackingRules = new[]
-            {
+            VideoFileStackingRules =
+            [
                 new FileStackRule(@"^(?<filename>.*?)(?:(?<=[\]\)\}])|[ _.-]+)[\(\[]?(?<parttype>cd|dvd|part|pt|dis[ck])[ _.-]*(?<number>[0-9]+)[\)\]]?(?:\.[^.]+)?$", true),
                 new FileStackRule(@"^(?<filename>.*?)(?:(?<=[\]\)\}])|[ _.-]+)[\(\[]?(?<parttype>cd|dvd|part|pt|dis[ck])[ _.-]*(?<number>[a-d])[\)\]]?(?:\.[^.]+)?$", false)
-            };
+            ];
 
-            CleanDateTimes = new[]
-            {
+            CleanDateTimes =
+            [
                 @"(.+[^_\,\.\(\)\[\]\-])[_\.\(\)\[\]\-](19[0-9]{2}|20[0-9]{2})(?![0-9]+|\W[0-9]{2}\W[0-9]{2})([ _\,\.\(\)\[\]\-][^0-9]|).*(19[0-9]{2}|20[0-9]{2})*",
                 @"(.+[^_\,\.\(\)\[\]\-])[ _\.\(\)\[\]\-]+(19[0-9]{2}|20[0-9]{2})(?![0-9]+|\W[0-9]{2}\W[0-9]{2})([ _\,\.\(\)\[\]\-][^0-9]|).*(19[0-9]{2}|20[0-9]{2})*"
-            };
+            ];
 
-            CleanStrings = new[]
-            {
-                @"^\s*(?<cleaned>.+?)[ _\,\.\(\)\[\]\-](3d|sbs|tab|hsbs|htab|mvc|HDR|HDC|UHD|UltraHD|4k|ac3|dts|custom|dc|divx|divx5|dsr|dsrip|dutch|dvd|dvdrip|dvdscr|dvdscreener|screener|dvdivx|cam|fragment|fs|hdtv|hdrip|hdtvrip|internal|limited|multi|subs|ntsc|ogg|ogm|pal|pdtv|proper|repack|rerip|retail|cd[1-9]|r5|bd5|bd|se|svcd|swedish|german|read.nfo|nfofix|unrated|ws|telesync|ts|telecine|tc|brrip|bdrip|480p|480i|576p|576i|720p|720i|1080p|1080i|2160p|hrhd|hrhdtv|hddvd|bluray|blu-ray|x264|x265|h264|h265|xvid|xvidvd|xxx|www.www|AAC|DTS|\[.*\])([ _\,\.\(\)\[\]\-]|$)",
-                @"^(?<cleaned>.+?)(\[.*\])",
+            CleanStrings =
+            [
+                @"^\s*(?<cleaned>.+?)[ _\,\.\(\)\[\]\-](3d|sbs|tab|hsbs|htab|mvc|HDR|HDC|UHD|UltraHD|4k|ac3|dts|custom|dc|divx|divx5|dsr|dsrip|dutch|dvd|dvdrip|dvdscr|dvdscreener|screener|dvdivx|cam|fragment|fs|hdtv|hdrip|hdtvrip|internal|limited|multi|subs|ntsc|ogg|ogm|pal|pdtv|proper|repack|rerip|retail|cd[1-9]|r5|bd5|bd|se|svcd|swedish|german|read.nfo|nfofix|unrated|ws|web-dl|telesync|ts|telecine|tc|brrip|bdrip|480p|480i|576p|576i|720p|720i|1080p|1080i|2160p|hrhd|hrhdtv|hddvd|bluray|blu-ray|x264|x265|h264|h265|xvid|xvidvd|xxx|www.www|AAC|DTS)(?=[ _\,\.\(\)\[\]\-]|$)",
+                @"^\s*(?<cleaned>.+?)((\s*\[[^\]]+\]\s*)+)(\.[^\s]+)?$",
                 @"^\s*(?<cleaned>.+?)\WE[0-9]+(-|~)E?[0-9]+(\W|$)",
                 @"^\s*\[[^\]]+\](?!\.\w+$)\s*(?<cleaned>.+)",
                 @"^\s*(?<cleaned>.+?)\s+-\s+[0-9]+\s*$",
                 @"^\s*(?<cleaned>.+?)(([-._ ](trailer|sample))|-(scene|clip|behindthescenes|deleted|deletedscene|featurette|short|interview|other|extra))$"
-            };
+            ];
 
-            SubtitleFileExtensions = new[]
-            {
+            SubtitleFileExtensions =
+            [
                 ".ass",
                 ".mks",
                 ".sami",
@@ -171,20 +170,29 @@ namespace Emby.Naming.Common
                 ".sub",
                 ".sup",
                 ".vtt",
-            };
+            ];
 
-            AlbumStackingPrefixes = new[]
-            {
+            LyricFileExtensions =
+            [
+                ".lrc",
+                ".elrc",
+                ".txt"
+            ];
+
+            AlbumStackingPrefixes =
+            [
                 "cd",
                 "digital media",
                 "disc",
                 "disk",
                 "vol",
-                "volume"
-            };
+                "volume",
+                "part",
+                "act"
+            ];
 
-            ArtistSubfolders = new[]
-            {
+            ArtistSubfolders =
+            [
                 "albums",
                 "broadcasts",
                 "bootlegs",
@@ -199,10 +207,10 @@ namespace Emby.Naming.Common
                 "soundtracks",
                 "spokenwords",
                 "streets"
-            };
+            ];
 
-            AudioFileExtensions = new[]
-            {
+            AudioFileExtensions =
+            [
                 ".669",
                 ".3gp",
                 ".aa",
@@ -216,6 +224,7 @@ namespace Emby.Naming.Common
                 ".afc",
                 ".amf",
                 ".aif",
+                ".aifc",
                 ".aiff",
                 ".alac",
                 ".amr",
@@ -231,6 +240,8 @@ namespace Emby.Naming.Common
                 ".dsp",
                 ".dts",
                 ".dvf",
+                ".eac3",
+                ".ec3",
                 ".far",
                 ".flac",
                 ".gdm",
@@ -281,33 +292,33 @@ namespace Emby.Naming.Common
                 ".xm",
                 ".xsp",
                 ".ymf"
-            };
+            ];
 
-            MediaFlagDelimiters = new[]
-            {
+            MediaFlagDelimiters =
+            [
                 '.'
-            };
+            ];
 
-            MediaForcedFlags = new[]
-            {
+            MediaForcedFlags =
+            [
                 "foreign",
                 "forced"
-            };
+            ];
 
-            MediaDefaultFlags = new[]
-            {
+            MediaDefaultFlags =
+            [
                 "default"
-            };
+            ];
 
-            MediaHearingImpairedFlags = new[]
-            {
+            MediaHearingImpairedFlags =
+            [
                 "cc",
                 "hi",
                 "sdh"
-            };
+            ];
 
-            EpisodeExpressions = new[]
-            {
+            EpisodeExpressions =
+            [
                 // *** Begin Kodi Standard Naming
                 // <!-- foo.s01.e01, foo.s01_e01, S01E02 foo, S01 - E02 -->
                 new EpisodeExpression(@".*(\\|\/)(?<seriesname>((?![Ss]([0-9]+)[][ ._-]*[Ee]([0-9]+))[^\\\/])*)?[Ss](?<seasonnumber>[0-9]+)[][ ._-]*[Ee](?<epnumber>[0-9]+)([^\\/]*)$")
@@ -318,25 +329,25 @@ namespace Emby.Naming.Common
                 new EpisodeExpression(@"[\._ -]()[Ee][Pp]_?([0-9]+)([^\\/]*)$"),
                 // <!-- foo.E01., foo.e01. -->
                 new EpisodeExpression(@"[^\\/]*?()\.?[Ee]([0-9]+)\.([^\\/]*)$"),
-                new EpisodeExpression(@"(?<year>[0-9]{4})[._ -](?<month>[0-9]{2})[._ -](?<day>[0-9]{2})", true)
+                new EpisodeExpression("(?<year>[0-9]{4})[._ -](?<month>[0-9]{2})[._ -](?<day>[0-9]{2})", true)
                 {
-                    DateTimeFormats = new[]
-                    {
+                    DateTimeFormats =
+                    [
                         "yyyy.MM.dd",
                         "yyyy-MM-dd",
                         "yyyy_MM_dd",
                         "yyyy MM dd"
-                    }
+                    ]
                 },
-                new EpisodeExpression(@"(?<day>[0-9]{2})[._ -](?<month>[0-9]{2})[._ -](?<year>[0-9]{4})", true)
+                new EpisodeExpression("(?<day>[0-9]{2})[._ -](?<month>[0-9]{2})[._ -](?<year>[0-9]{4})", true)
                 {
-                    DateTimeFormats = new[]
-                    {
+                    DateTimeFormats =
+                    [
                         "dd.MM.yyyy",
                         "dd-MM-yyyy",
                         "dd_MM_yyyy",
                         "dd MM yyyy"
-                    }
+                    ]
                 },
 
                 // This isn't a Kodi naming rule, but the expression below causes false episode numbers for
@@ -350,7 +361,10 @@ namespace Emby.Naming.Common
                 // Not a Kodi rule as well, but the expression below also causes false positives,
                 // so we make sure this one gets tested first.
                 // "Foo Bar 889"
-                new EpisodeExpression(@".*[\\\/](?![Ee]pisode)(?<seriesname>[\w\s]+?)\s(?<epnumber>[0-9]{1,4})(-(?<endingepnumber>[0-9]{2,4}))*[^\\\/x]*$")
+                // Names carrying an SxxEyy marker are excluded because the Kodi expression above already covers them.
+                // Without that guard this expression reads digits out of the title instead, turning
+                // "S01E01 1-23-45 [Bluray-1080p]" into episodes 1 through 45.
+                new EpisodeExpression(@".*[\\\/](?![Ee]pisode)(?![^\\\/]*[Ss][0-9]+[][ ._-]*[Ee][0-9]+)(?<seriesname>[\w\s]+?)\s(?<epnumber>[0-9]{1,4})(-(?<endingepnumber>[0-9]{2,4}))*[^\\\/x]*$")
                 {
                     IsNamed = true
                 },
@@ -367,6 +381,14 @@ namespace Emby.Naming.Common
                     IsNamed = true
                 },
 
+                // "Name - 101.mkv", "Name - 101 [720p].mkv", "Name - 101 (2020).mkv"
+                // Handles absolute episode numbers with hyphen delimiter (common in anime)
+                // Without brackets (bracketed version handled above)
+                new EpisodeExpression(@".*[\\\/](?<seriesname>[^\\\/]+?)[\s_]+-[\s_]+(?<epnumber>[0-9]+)[\s_]*(?:\[.*?\]|\(.*?\))*[\s_]*(?:\.\w+)?$")
+                {
+                    IsNamed = true
+                },
+
                 // /server/anything_102.mp4
                 // /server/james.corden.2017.04.20.anne.hathaway.720p.hdtv.x264-crooks.mkv
                 // /server/anything_1996.11.14.mp4
@@ -376,7 +398,7 @@ namespace Emby.Naming.Common
                     IsNamed = true,
                     SupportsAbsoluteEpisodeNumbers = false
                 },
-                new EpisodeExpression("[\\/._ -]p(?:ar)?t[_. -]()([ivx]+|[0-9]+)([._ -][^\\/]*)$")
+                new EpisodeExpression(@"[\/._ -]p(?:ar)?t[_. -]()([ivx]+|[0-9]+)([._ -][^\/]*)$")
                 {
                     SupportsAbsoluteEpisodeNumbers = true
                 },
@@ -417,7 +439,7 @@ namespace Emby.Naming.Common
                 },
 
                 // "1-12 episode title"
-                new EpisodeExpression(@"([0-9]+)-([0-9]+)"),
+                new EpisodeExpression("([0-9]+)-([0-9]+)"),
 
                 // "01 - blah.avi", "01-blah.avi"
                 new EpisodeExpression(@".*(\\|\/)(?<epnumber>[0-9]{1,3})(-(?<endingepnumber>[0-9]{2,3}))*\s?-\s?[^\\\/]*$")
@@ -460,10 +482,18 @@ namespace Emby.Naming.Common
                 {
                     IsNamed = true
                 },
-            };
 
-            VideoExtraRules = new[]
-            {
+                // Anime style expression
+                // "[Group][Series Name][21][1080p][FLAC][HASH]"
+                // "[Group] Series Name [04][BDRIP]"
+                new EpisodeExpression(@"(?:\[(?:[^\]]+)\]\s*)?(?<seriesname>\[[^\]]+\]|[^[\]]+)\s*\[(?<epnumber>[0-9]+)\]")
+                {
+                    IsNamed = true
+                },
+            ];
+
+            VideoExtraRules =
+            [
                 new ExtraRule(
                     ExtraType.Trailer,
                     ExtraRuleType.DirectoryName,
@@ -513,6 +543,12 @@ namespace Emby.Naming.Common
                     MediaType.Video),
 
                 new ExtraRule(
+                    ExtraType.Sample,
+                    ExtraRuleType.DirectoryName,
+                    "sample",
+                    MediaType.Video),
+
+                new ExtraRule(
                     ExtraType.Short,
                     ExtraRuleType.DirectoryName,
                     "shorts",
@@ -533,6 +569,12 @@ namespace Emby.Naming.Common
                 new ExtraRule(
                     ExtraType.Unknown,
                     ExtraRuleType.DirectoryName,
+                    "extra",
+                    MediaType.Video),
+
+                new ExtraRule(
+                    ExtraType.Unknown,
+                    ExtraRuleType.DirectoryName,
                     "other",
                     MediaType.Video),
 
@@ -547,6 +589,18 @@ namespace Emby.Naming.Common
                     ExtraRuleType.Filename,
                     "trailer",
                     MediaType.Video),
+
+                new ExtraRule(
+                    ExtraType.Sample,
+                    ExtraRuleType.Filename,
+                    "sample",
+                    MediaType.Video),
+
+                new ExtraRule(
+                    ExtraType.ThemeSong,
+                    ExtraRuleType.Filename,
+                    "theme",
+                    MediaType.Audio),
 
                 new ExtraRule(
                     ExtraType.Trailer,
@@ -569,13 +623,7 @@ namespace Emby.Naming.Common
                 new ExtraRule(
                     ExtraType.Trailer,
                     ExtraRuleType.Suffix,
-                    " trailer",
-                    MediaType.Video),
-
-                new ExtraRule(
-                    ExtraType.Sample,
-                    ExtraRuleType.Filename,
-                    "sample",
+                    "- trailer",
                     MediaType.Video),
 
                 new ExtraRule(
@@ -599,14 +647,8 @@ namespace Emby.Naming.Common
                 new ExtraRule(
                     ExtraType.Sample,
                     ExtraRuleType.Suffix,
-                    " sample",
+                    "- sample",
                     MediaType.Video),
-
-                new ExtraRule(
-                    ExtraType.ThemeSong,
-                    ExtraRuleType.Filename,
-                    "theme",
-                    MediaType.Audio),
 
                 new ExtraRule(
                     ExtraType.Scene,
@@ -667,14 +709,14 @@ namespace Emby.Naming.Common
                     ExtraRuleType.Suffix,
                     "-other",
                     MediaType.Video)
-            };
+            ];
 
             AllExtrasTypesFolderNames = VideoExtraRules
                 .Where(i => i.RuleType == ExtraRuleType.DirectoryName)
                 .ToDictionary(i => i.Token, i => i.ExtraType, StringComparer.OrdinalIgnoreCase);
 
-            Format3DRules = new[]
-            {
+            Format3DRules =
+            [
                 // Kodi rules:
                 new Format3DRule(
                     precedingToken: "3d",
@@ -701,10 +743,10 @@ namespace Emby.Naming.Common
                 new Format3DRule("tab"),
                 new Format3DRule("sbs3d"),
                 new Format3DRule("mvc")
-            };
+            ];
 
-            AudioBookPartsExpressions = new[]
-            {
+            AudioBookPartsExpressions =
+            [
                 // Detect specified chapters, like CH 01
                 @"ch(?:apter)?[\s_-]?(?<chapter>[0-9]+)",
                 // Detect specified parts, like Part 02
@@ -712,19 +754,19 @@ namespace Emby.Naming.Common
                 // Chapter is often beginning of filename
                 "^(?<chapter>[0-9]+)",
                 // Part if often ending of filename
-                @"(?<!ch(?:apter) )(?<part>[0-9]+)$",
+                "(?<!ch(?:apter) )(?<part>[0-9]+)$",
                 // Sometimes named as 0001_005 (chapter_part)
                 "(?<chapter>[0-9]+)_(?<part>[0-9]+)",
                 // Some audiobooks are ripped from cd's, and will be named by disk number.
                 @"dis(?:c|k)[\s_-]?(?<chapter>[0-9]+)"
-            };
+            ];
 
-            AudioBookNamesExpressions = new[]
-            {
+            AudioBookNamesExpressions =
+            [
                 // Detect year usually in brackets after name Batman (2020)
                 @"^(?<name>.+?)\s*\(\s*(?<year>[0-9]{4})\s*\)\s*$",
                 @"^\s*(?<name>[^ ].*?)\s*$"
-            };
+            ];
 
             MultipleEpisodeExpressions = new[]
             {
@@ -790,6 +832,11 @@ namespace Emby.Naming.Common
         /// Gets or sets list of subtitle file extensions.
         /// </summary>
         public string[] SubtitleFileExtensions { get; set; }
+
+        /// <summary>
+        /// Gets the list of lyric file extensions.
+        /// </summary>
+        public string[] LyricFileExtensions { get; }
 
         /// <summary>
         /// Gets or sets list of episode regular expressions.
@@ -859,12 +906,12 @@ namespace Emby.Naming.Common
         /// <summary>
         /// Gets list of clean datetime regular expressions.
         /// </summary>
-        public Regex[] CleanDateTimeRegexes { get; private set; } = Array.Empty<Regex>();
+        public Regex[] CleanDateTimeRegexes { get; private set; } = [];
 
         /// <summary>
         /// Gets list of clean string regular expressions.
         /// </summary>
-        public Regex[] CleanStringRegexes { get; private set; } = Array.Empty<Regex>();
+        public Regex[] CleanStringRegexes { get; private set; } = [];
 
         /// <summary>
         /// Compiles raw regex strings into regexes.

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Linq;
 using System.Net;
@@ -7,10 +7,14 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
-using Jellyfin.Data.Entities;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Common.Net;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Entities;
@@ -23,6 +27,7 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Session;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Api.Helpers;
@@ -40,6 +45,7 @@ public class MediaInfoHelper
     private readonly ILogger<MediaInfoHelper> _logger;
     private readonly INetworkManager _networkManager;
     private readonly IDeviceManager _deviceManager;
+    private readonly IServerApplicationHost _appHost;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaInfoHelper"/> class.
@@ -52,6 +58,7 @@ public class MediaInfoHelper
     /// <param name="logger">Instance of the <see cref="ILogger{MediaInfoHelper}"/> interface.</param>
     /// <param name="networkManager">Instance of the <see cref="INetworkManager"/> interface.</param>
     /// <param name="deviceManager">Instance of the <see cref="IDeviceManager"/> interface.</param>
+    /// <param name="appHost">Instance of the <see cref="IServerApplicationHost"/> interface.</param>
     public MediaInfoHelper(
         IUserManager userManager,
         ILibraryManager libraryManager,
@@ -60,7 +67,8 @@ public class MediaInfoHelper
         IServerConfigurationManager serverConfigurationManager,
         ILogger<MediaInfoHelper> logger,
         INetworkManager networkManager,
-        IDeviceManager deviceManager)
+        IDeviceManager deviceManager,
+        IServerApplicationHost appHost)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
@@ -70,51 +78,28 @@ public class MediaInfoHelper
         _logger = logger;
         _networkManager = networkManager;
         _deviceManager = deviceManager;
+        _appHost = appHost;
     }
 
     /// <summary>
     /// Get playback info.
     /// </summary>
-    /// <param name="id">Item id.</param>
-    /// <param name="userId">User Id.</param>
+    /// <param name="item">The item.</param>
+    /// <param name="user">The user.</param>
+    /// <param name="request">The current <see cref="HttpRequest"/>.</param>
     /// <param name="mediaSourceId">Media source id.</param>
     /// <param name="liveStreamId">Live stream id.</param>
     /// <returns>A <see cref="Task"/> containing the <see cref="PlaybackInfoResponse"/>.</returns>
     public async Task<PlaybackInfoResponse> GetPlaybackInfo(
-        Guid id,
-        Guid? userId,
+        BaseItem item,
+        User? user,
+        HttpRequest request,
         string? mediaSourceId = null,
         string? liveStreamId = null)
     {
-        var user = userId is null || userId.Value.Equals(default)
-            ? null
-            : _userManager.GetUserById(userId.Value);
-        var item = _libraryManager.GetItemById(id);
         var result = new PlaybackInfoResponse();
 
-        MediaSourceInfo[] mediaSources;
-        if (string.IsNullOrWhiteSpace(liveStreamId))
-        {
-            // TODO (moved from MediaBrowser.Api) handle supportedLiveMediaTypes?
-            var mediaSourcesList = await _mediaSourceManager.GetPlaybackMediaSources(item, user, true, true, CancellationToken.None).ConfigureAwait(false);
-
-            if (string.IsNullOrWhiteSpace(mediaSourceId))
-            {
-                mediaSources = mediaSourcesList.ToArray();
-            }
-            else
-            {
-                mediaSources = mediaSourcesList
-                    .Where(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase))
-                    .ToArray();
-            }
-        }
-        else
-        {
-            var mediaSource = await _mediaSourceManager.GetLiveStream(liveStreamId, CancellationToken.None).ConfigureAwait(false);
-
-            mediaSources = new[] { mediaSource };
-        }
+        var mediaSources = await ResolvePlaybackMediaSources(item, user, mediaSourceId, liveStreamId).ConfigureAwait(false);
 
         if (mediaSources.Length == 0)
         {
@@ -129,6 +114,18 @@ public class MediaInfoHelper
             var mediaSourcesClone = JsonSerializer.Deserialize<MediaSourceInfo[]>(JsonSerializer.SerializeToUtf8Bytes(mediaSources));
             if (mediaSourcesClone is not null)
             {
+                // Carry over the default audio index source.
+                // This field is not intended to be exposed to API clients, but it is used internally by the server
+                for (int i = 0; i < mediaSourcesClone.Length && i < mediaSources.Length; i++)
+                {
+                    mediaSourcesClone[i].DefaultAudioIndexSource = mediaSources[i].DefaultAudioIndexSource;
+                }
+
+                foreach (var mediaSource in mediaSourcesClone)
+                {
+                    RewritePublishedLiveStreamPath(mediaSource, request);
+                }
+
                 result.MediaSources = mediaSourcesClone;
             }
 
@@ -136,6 +133,28 @@ public class MediaInfoHelper
         }
 
         return result;
+    }
+
+    private async Task<MediaSourceInfo[]> ResolvePlaybackMediaSources(BaseItem item, User? user, string? mediaSourceId, string? liveStreamId)
+    {
+        if (!string.IsNullOrWhiteSpace(liveStreamId))
+        {
+            var mediaSource = await _mediaSourceManager.GetLiveStream(liveStreamId, CancellationToken.None).ConfigureAwait(false);
+
+            return new[] { mediaSource };
+        }
+
+        // TODO (moved from MediaBrowser.Api) handle supportedLiveMediaTypes?
+        var mediaSourcesList = await _mediaSourceManager.GetPlaybackMediaSources(item, user, true, true, CancellationToken.None).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(mediaSourceId))
+        {
+            return mediaSourcesList.ToArray();
+        }
+
+        return mediaSourcesList
+            .Where(i => string.Equals(i.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
     }
 
     /// <summary>
@@ -158,6 +177,7 @@ public class MediaInfoHelper
     /// <param name="enableTranscoding">Enable transcoding.</param>
     /// <param name="allowVideoStreamCopy">Allow video stream copy.</param>
     /// <param name="allowAudioStreamCopy">Allow audio stream copy.</param>
+    /// <param name="alwaysBurnInSubtitleWhenTranscoding">Always burn-in subtitle when transcoding.</param>
     /// <param name="ipAddress">Requesting IP address.</param>
     public void SetDeviceSpecificData(
         BaseItem item,
@@ -177,6 +197,7 @@ public class MediaInfoHelper
         bool enableTranscoding,
         bool allowVideoStreamCopy,
         bool allowAudioStreamCopy,
+        bool alwaysBurnInSubtitleWhenTranscoding,
         IPAddress ipAddress)
     {
         var streamBuilder = new StreamBuilder(_mediaEncoder, _logger);
@@ -190,7 +211,8 @@ public class MediaInfoHelper
             Profile = profile,
             MaxAudioChannels = maxAudioChannels,
             AllowAudioStreamCopy = allowAudioStreamCopy,
-            AllowVideoStreamCopy = allowVideoStreamCopy
+            AllowVideoStreamCopy = allowVideoStreamCopy,
+            AlwaysBurnInSubtitleWhenTranscoding = alwaysBurnInSubtitleWhenTranscoding,
         };
 
         if (string.Equals(mediaSourceId, mediaSource.Id, StringComparison.OrdinalIgnoreCase))
@@ -243,7 +265,7 @@ public class MediaInfoHelper
         }
 
         // Beginning of Playback Determination
-        var streamInfo = string.Equals(item.MediaType, MediaType.Audio, StringComparison.OrdinalIgnoreCase)
+        var streamInfo = item.MediaType == MediaType.Audio
             ? streamBuilder.GetOptimalAudioStream(options)
             : streamBuilder.GetOptimalVideoStream(options);
 
@@ -287,18 +309,20 @@ public class MediaInfoHelper
                 mediaSource.SupportsDirectPlay = false;
                 mediaSource.SupportsDirectStream = false;
 
-                mediaSource.TranscodingUrl = streamInfo.ToUrl("-", claimsPrincipal.GetToken()).TrimStart('-');
-                mediaSource.TranscodingUrl += "&allowVideoStreamCopy=false";
-                mediaSource.TranscodingUrl += "&allowAudioStreamCopy=false";
+                mediaSource.TranscodingUrl = streamInfo.ToUrl(null, claimsPrincipal.GetToken(), "&allowVideoStreamCopy=false&allowAudioStreamCopy=false");
                 mediaSource.TranscodingContainer = streamInfo.Container;
                 mediaSource.TranscodingSubProtocol = streamInfo.SubProtocol;
+                if (streamInfo.AlwaysBurnInSubtitleWhenTranscoding)
+                {
+                    mediaSource.TranscodingUrl += "&alwaysBurnInSubtitleWhenTranscoding=true";
+                }
             }
             else
             {
                 if (!mediaSource.SupportsDirectPlay && (mediaSource.SupportsTranscoding || mediaSource.SupportsDirectStream))
                 {
                     streamInfo.PlayMethod = PlayMethod.Transcode;
-                    mediaSource.TranscodingUrl = streamInfo.ToUrl("-", claimsPrincipal.GetToken()).TrimStart('-');
+                    mediaSource.TranscodingUrl = streamInfo.ToUrl(null, claimsPrincipal.GetToken(), null);
 
                     if (!allowVideoStreamCopy)
                     {
@@ -308,6 +332,11 @@ public class MediaInfoHelper
                     if (!allowAudioStreamCopy)
                     {
                         mediaSource.TranscodingUrl += "&allowAudioStreamCopy=false";
+                    }
+
+                    if (streamInfo.AlwaysBurnInSubtitleWhenTranscoding)
+                    {
+                        mediaSource.TranscodingUrl += "&alwaysBurnInSubtitleWhenTranscoding=true";
                     }
                 }
             }
@@ -334,11 +363,20 @@ public class MediaInfoHelper
     /// </summary>
     /// <param name="result">Playback info response.</param>
     /// <param name="maxBitrate">Max bitrate.</param>
-    public void SortMediaSources(PlaybackInfoResponse result, long? maxBitrate)
+    /// <param name="preferredItemId">The id of the queried item, whose own media source must stay the default.</param>
+    public void SortMediaSources(PlaybackInfoResponse result, long? maxBitrate, Guid preferredItemId = default)
     {
         var originalList = result.MediaSources.ToList();
 
-        result.MediaSources = result.MediaSources.OrderBy(i =>
+        // The queried item's source carries the user's resume state for that version, so it must stay the
+        // default the client plays. An unfavorable bitrate means transcoding it, not switching to a sibling version.
+        var preferredId = preferredItemId.IsEmpty()
+            ? null
+            : preferredItemId.ToString("N", CultureInfo.InvariantCulture);
+
+        result.MediaSources = result.MediaSources
+            .OrderByDescending(i => preferredId is not null && string.Equals(i.Id, preferredId, StringComparison.OrdinalIgnoreCase))
+            .ThenBy(i =>
             {
                 // Nothing beats direct playing a file
                 if (i.SupportsDirectPlay && i.Protocol == MediaProtocol.File)
@@ -389,6 +427,8 @@ public class MediaInfoHelper
     {
         var result = await _mediaSourceManager.OpenLiveStream(request, CancellationToken.None).ConfigureAwait(false);
 
+        RewritePublishedLiveStreamPath(result.MediaSource, httpContext.Request);
+
         var profile = request.DeviceProfile;
         if (profile is null)
         {
@@ -401,7 +441,8 @@ public class MediaInfoHelper
 
         if (profile is not null)
         {
-            var item = _libraryManager.GetItemById(request.ItemId);
+            var item = _libraryManager.GetItemById<BaseItem>(request.ItemId)
+                ?? throw new ResourceNotFoundException();
 
             SetDeviceSpecificData(
                 item,
@@ -421,6 +462,7 @@ public class MediaInfoHelper
                 true,
                 true,
                 true,
+                request.AlwaysBurnInSubtitleWhenTranscoding,
                 httpContext.GetNormalizedRemoteIP());
         }
         else
@@ -495,5 +537,91 @@ public class MediaInfoHelper
         }
 
         return maxBitrate;
+    }
+
+    /// <summary>
+    /// Rewrites a Live TV media source's <see cref="MediaSourceInfo.Path"/> to the request-appropriate published
+    /// URL when it points at a Jellyfin-hosted live stream buffer, so response copies never leak server-local
+    /// addresses. Only opened live streams are eligible. The shared instance held by
+    /// <see cref="IMediaSourceManager"/> is never touched by this method.
+    /// </summary>
+    /// <param name="mediaSource">The media source clone to rewrite in place.</param>
+    /// <param name="request">The current <see cref="HttpRequest"/>.</param>
+    private void RewritePublishedLiveStreamPath(MediaSourceInfo mediaSource, HttpRequest request)
+    {
+        // Opened live streams always carry a LiveStreamId; this excludes pre-open and plugin/remote sources.
+        if (string.IsNullOrEmpty(mediaSource.LiveStreamId))
+        {
+            return;
+        }
+
+        var baseUrl = _serverConfigurationManager.GetNetworkConfiguration().BaseUrl;
+        var publishedPath = GetPublishedLiveStreamPath(_appHost.GetSmartApiUrl(request), mediaSource.Path, mediaSource.Protocol, baseUrl);
+
+        if (publishedPath is not null)
+        {
+            mediaSource.Path = publishedPath;
+            return;
+        }
+
+        if (mediaSource.Path is not null && mediaSource.Path.Contains("/LiveTv/LiveStreamFiles/", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogDebug("Not rewriting live stream path for media source {MediaSourceId}: the local path did not resolve under the request's smart API URL/BaseUrl", mediaSource.Id);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a Jellyfin-hosted Live TV buffer path to its request-appropriate published equivalent.
+    /// Returns null when the path isn't a Jellyfin-hosted <c>/LiveTv/LiveStreamFiles/</c> HTTP URL.
+    /// </summary>
+    /// <param name="smartApiUrl">The request-appropriate base URL, as returned by <see cref="IServerApplicationHost.GetSmartApiUrl(HttpRequest)"/>.</param>
+    /// <param name="localPath">The media source's local (LAN-access) path, as built from <see cref="IServerApplicationHost.GetApiUrlForLocalAccess"/>.</param>
+    /// <param name="protocol">The media source's protocol.</param>
+    /// <param name="baseUrl">The server's configured BaseUrl, if any.</param>
+    /// <returns>The published path, or null if the local path should be left unchanged.</returns>
+    internal static string? GetPublishedLiveStreamPath(
+        string smartApiUrl,
+        string? localPath,
+        MediaProtocol protocol,
+        string baseUrl)
+    {
+        if (protocol != MediaProtocol.Http
+            || !Uri.TryCreate(localPath, UriKind.Absolute, out var localUri))
+        {
+            return null;
+        }
+
+        var relativePath = localUri.PathAndQuery;
+        if (!string.IsNullOrEmpty(baseUrl))
+        {
+            var basePrefix = baseUrl + "/";
+            if (!relativePath.StartsWith(basePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            relativePath = relativePath[baseUrl.Length..];
+        }
+
+        if (!relativePath.StartsWith("/LiveTv/LiveStreamFiles/", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var prefix = smartApiUrl.TrimEnd('/');
+        if (!string.IsNullOrEmpty(baseUrl))
+        {
+            var includesBaseUrl = Uri.TryCreate(prefix, UriKind.Absolute, out var publishedUri)
+                && Uri.UnescapeDataString(publishedUri.AbsolutePath)
+                    .TrimEnd('/')
+                    .EndsWith(baseUrl, StringComparison.OrdinalIgnoreCase);
+
+            if (!includesBaseUrl)
+            {
+                prefix += baseUrl;
+            }
+        }
+
+        return prefix + relativePath;
     }
 }

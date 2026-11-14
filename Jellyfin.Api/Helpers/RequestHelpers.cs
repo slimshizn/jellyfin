@@ -1,12 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using Jellyfin.Api.Constants;
 using Jellyfin.Api.Extensions;
-using Jellyfin.Data.Entities;
-using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -29,15 +30,16 @@ public static class RequestHelpers
     /// </summary>
     /// <param name="sortBy">Sort By. Comma delimited string.</param>
     /// <param name="requestedSortOrder">Sort Order. Comma delimited string.</param>
+    /// <typeparam name="TSortBy">The type of the sort by field.</typeparam>
     /// <returns>Order By.</returns>
-    public static (string, SortOrder)[] GetOrderBy(IReadOnlyList<string> sortBy, IReadOnlyList<SortOrder> requestedSortOrder)
+    public static (TSortBy, SortOrder)[] GetOrderBy<TSortBy>(IReadOnlyList<TSortBy> sortBy, IReadOnlyList<SortOrder> requestedSortOrder)
     {
         if (sortBy.Count == 0)
         {
-            return Array.Empty<(string, SortOrder)>();
+            return Array.Empty<(TSortBy, SortOrder)>();
         }
 
-        var result = new (string, SortOrder)[sortBy.Count];
+        var result = new (TSortBy, SortOrder)[sortBy.Count];
         var i = 0;
         // Add elements which have a SortOrder specified
         for (; i < requestedSortOrder.Count; i++)
@@ -67,7 +69,7 @@ public static class RequestHelpers
         var authenticatedUserId = claimsPrincipal.GetUserId();
 
         // UserId not provided, fall back to authenticated user id.
-        if (userId is null || userId.Value.Equals(default))
+        if (userId.IsNullOrEmpty())
         {
             return authenticatedUserId;
         }
@@ -85,18 +87,17 @@ public static class RequestHelpers
     /// <summary>
     /// Checks if the user can update an entry.
     /// </summary>
-    /// <param name="userManager">An instance of the <see cref="IUserManager"/> interface.</param>
     /// <param name="claimsPrincipal">The <see cref="ClaimsPrincipal"/> for the current request.</param>
-    /// <param name="userId">The user id.</param>
+    /// <param name="user">The user id.</param>
     /// <param name="restrictUserPreferences">Whether to restrict the user preferences.</param>
     /// <returns>A <see cref="bool"/> whether the user can update the entry.</returns>
-    internal static bool AssertCanUpdateUser(IUserManager userManager, ClaimsPrincipal claimsPrincipal, Guid userId, bool restrictUserPreferences)
+    internal static bool AssertCanUpdateUser(ClaimsPrincipal claimsPrincipal, User user, bool restrictUserPreferences)
     {
         var authenticatedUserId = claimsPrincipal.GetUserId();
         var isAdministrator = claimsPrincipal.IsInRole(UserRoles.Administrator);
 
         // If they're going to update the record of another user, they must be an administrator
-        if (!userId.Equals(authenticatedUserId) && !isAdministrator)
+        if (!user.Id.Equals(authenticatedUserId) && !isAdministrator)
         {
             return false;
         }
@@ -107,19 +108,27 @@ public static class RequestHelpers
             return true;
         }
 
-        var user = userManager.GetUserById(userId);
-        if (user is null)
-        {
-            throw new ResourceNotFoundException();
-        }
-
         return user.EnableUserPreferenceAccess;
     }
 
-    internal static async Task<SessionInfo> GetSession(ISessionManager sessionManager, IUserManager userManager, HttpContext httpContext)
+    /// <summary>
+    /// Get the session based on http request.
+    /// </summary>
+    /// <param name="sessionManager">The session manager.</param>
+    /// <param name="userManager">The user manager.</param>
+    /// <param name="httpContext">The http context.</param>
+    /// <param name="userId">The optional userid.</param>
+    /// <returns>The session.</returns>
+    /// <exception cref="ResourceNotFoundException">Session not found.</exception>
+    public static async Task<SessionInfo> GetSession(ISessionManager sessionManager, IUserManager userManager, HttpContext httpContext, Guid? userId = null)
     {
-        var userId = httpContext.User.GetUserId();
-        var user = userManager.GetUserById(userId);
+        userId ??= httpContext.User.GetUserId();
+        User? user = null;
+        if (!userId.IsNullOrEmpty())
+        {
+            user = userManager.GetUserById(userId.Value);
+        }
+
         var session = await sessionManager.LogSessionActivity(
             httpContext.User.GetClient(),
             httpContext.User.GetVersion(),
@@ -147,7 +156,6 @@ public static class RequestHelpers
         QueryResult<(BaseItem Item, ItemCounts ItemCounts)> result,
         DtoOptions dtoOptions,
         IDtoService dtoService,
-        bool includeItemTypes,
         User? user)
     {
         var dtos = result.Items.Select(i =>
@@ -155,7 +163,7 @@ public static class RequestHelpers
             var (baseItem, counts) = i;
             var dto = dtoService.GetItemByNameDto(baseItem, dtoOptions, null, user);
 
-            if (includeItemTypes)
+            if (counts is not null)
             {
                 dto.ChildCount = counts.ItemCount;
                 dto.ProgramCount = counts.ProgramCount;
@@ -166,6 +174,7 @@ public static class RequestHelpers
                 dto.AlbumCount = counts.AlbumCount;
                 dto.SongCount = counts.SongCount;
                 dto.ArtistCount = counts.ArtistCount;
+                dto.MusicVideoCount = counts.MusicVideoCount;
             }
 
             return dto;

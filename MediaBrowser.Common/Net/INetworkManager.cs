@@ -82,7 +82,7 @@ namespace MediaBrowser.Common.Net
         /// <param name="port">Optional port returned, if it's part of an override.</param>
         /// <param name="skipOverrides">Optional boolean denoting if published server overrides should be ignored. Defaults to false.</param>
         /// <returns>IP address to use, or loopback address if all else fails.</returns>
-        string GetBindAddress(IPAddress source, out int? port, bool skipOverrides = false);
+        string GetBindAddress(IPAddress? source, out int? port, bool skipOverrides = false);
 
         /// <summary>
         /// Retrieves the bind address to use in system URLs. (Server Discovery, PlayTo, LiveTV, SystemInfo)
@@ -93,12 +93,6 @@ namespace MediaBrowser.Common.Net
         /// <param name="port">Optional port returned, if it's part of an override.</param>
         /// <returns>IP address to use, or loopback address if all else fails.</returns>
         string GetBindAddress(string source, out int? port);
-
-        /// <summary>
-        /// Get a list of all the MAC addresses associated with active interfaces.
-        /// </summary>
-        /// <returns>List of MAC addresses.</returns>
-        IReadOnlyList<PhysicalAddress> GetMacAddresses();
 
         /// <summary>
         /// Returns true if the address is part of the user defined LAN.
@@ -133,7 +127,7 @@ namespace MediaBrowser.Common.Net
         /// Checks if <paramref name="remoteIP"/> has access to the server.
         /// </summary>
         /// <param name="remoteIP">IP address of the client.</param>
-        /// <returns><b>True</b> if it has access, otherwise <b>false</b>.</returns>
-        bool HasRemoteAccess(IPAddress remoteIP);
+        /// <returns>The result of evaluating the access policy, <c>Allow</c> if it should be allowed.</returns>
+        RemoteAccessPolicyResult ShouldAllowServerAccess(IPAddress remoteIP);
     }
 }

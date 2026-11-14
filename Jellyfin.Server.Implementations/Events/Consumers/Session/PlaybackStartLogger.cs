@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Activity;
@@ -60,7 +61,7 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.Session
             await _activityManager.CreateAsync(new ActivityLog(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    _localizationManager.GetLocalizedString("UserStartedPlayingItemWithValues"),
+                    _localizationManager.GetServerLocalizedString("UserStartedPlayingItemWithValues"),
                     user.Username,
                     GetItemName(eventArgs.MediaInfo),
                     eventArgs.DeviceName),
@@ -89,14 +90,14 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.Session
             return name;
         }
 
-        private static string GetPlaybackNotificationType(string mediaType)
+        private static string GetPlaybackNotificationType(MediaType mediaType)
         {
-            if (string.Equals(mediaType, MediaType.Audio, StringComparison.OrdinalIgnoreCase))
+            if (mediaType == MediaType.Audio)
             {
                 return NotificationType.AudioPlayback.ToString();
             }
 
-            if (string.Equals(mediaType, MediaType.Video, StringComparison.OrdinalIgnoreCase))
+            if (mediaType == MediaType.Video)
             {
                 return NotificationType.VideoPlayback.ToString();
             }

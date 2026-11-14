@@ -1,10 +1,11 @@
 #pragma warning disable CS1591
 
 using System;
+using System.Globalization;
+using Jellyfin.Data.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Sorting;
-using MediaBrowser.Model.Querying;
 
 namespace Emby.Server.Implementations.Sorting
 {
@@ -14,7 +15,7 @@ namespace Emby.Server.Implementations.Sorting
         /// Gets the name.
         /// </summary>
         /// <value>The name.</value>
-        public string Name => ItemSortBy.Studio;
+        public ItemSortBy Type => ItemSortBy.Studio;
 
         /// <summary>
         /// Compares the specified x.
@@ -27,7 +28,7 @@ namespace Emby.Server.Implementations.Sorting
             ArgumentNullException.ThrowIfNull(x);
             ArgumentNullException.ThrowIfNull(y);
 
-            return AlphanumericComparator.CompareValues(x.Studios.FirstOrDefault(), y.Studios.FirstOrDefault());
+            return CultureInfo.InvariantCulture.CompareInfo.Compare(x.Studios.FirstOrDefault(), y.Studios.FirstOrDefault(), CompareOptions.NumericOrdering);
         }
     }
 }

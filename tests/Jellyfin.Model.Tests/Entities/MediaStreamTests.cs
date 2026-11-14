@@ -108,6 +108,49 @@ namespace Jellyfin.Model.Tests.Entities
                     IsExternal = true
                 });
 
+            // Test LocalizedLanguage is used when set (fixes zh-CN display issue #15935)
+            data.Add(
+                "Chinese (Simplified) - SRT",
+                new MediaStream
+                {
+                    Type = MediaStreamType.Subtitle,
+                    Title = null,
+                    Language = "zh-CN",
+                    LocalizedLanguage = "Chinese (Simplified)",
+                    IsForced = false,
+                    IsDefault = false,
+                    Codec = "SRT"
+                });
+
+            // Test LocalizedLanguage for audio streams
+            data.Add(
+                "Japanese - AAC - Stereo",
+                new MediaStream
+                {
+                    Type = MediaStreamType.Audio,
+                    Title = null,
+                    Language = "jpn",
+                    LocalizedLanguage = "Japanese",
+                    IsForced = false,
+                    IsDefault = false,
+                    Codec = "AAC",
+                    ChannelLayout = "stereo"
+                });
+
+            // Test fallback to Language when LocalizedLanguage is null
+            data.Add(
+                "Eng - ASS",
+                new MediaStream
+                {
+                    Type = MediaStreamType.Subtitle,
+                    Title = null,
+                    Language = "eng",
+                    LocalizedLanguage = null,
+                    IsForced = false,
+                    IsDefault = false,
+                    Codec = "ASS"
+                });
+
             return data;
         }
 
@@ -192,7 +235,7 @@ namespace Jellyfin.Model.Tests.Entities
         [InlineData(4090, 3070, false, "4K")]
         [InlineData(7680, 4320, false, "8K")]
         [InlineData(8190, 6140, false, "8K")]
-        public void GetResolutionText_Valid(int? width, int? height, bool interlaced, string expected)
+        public void GetResolutionText_Valid(int? width, int? height, bool interlaced, string? expected)
         {
             var mediaStream = new MediaStream()
             {

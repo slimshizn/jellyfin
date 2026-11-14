@@ -1,4 +1,7 @@
+#pragma warning disable CA1819 // XML serialization handles collections improperly, so we need to use arrays
+
 #nullable disable
+using System.ComponentModel;
 using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Model.Configuration;
@@ -26,11 +29,13 @@ public class EncodingOptions
         // This is a DRM device that is almost guaranteed to be there on every intel platform,
         // plus it's the default one in ffmpeg if you don't specify anything
         VaapiDevice = "/dev/dri/renderD128";
+        QsvDevice = string.Empty;
         EnableTonemapping = false;
         EnableVppTonemapping = false;
-        TonemappingAlgorithm = "bt2390";
-        TonemappingMode = "auto";
-        TonemappingRange = "auto";
+        EnableVideoToolboxTonemapping = false;
+        TonemappingAlgorithm = TonemappingAlgorithm.bt2390;
+        TonemappingMode = TonemappingMode.auto;
+        TonemappingRange = TonemappingRange.auto;
         TonemappingDesat = 0;
         TonemappingPeak = 100;
         TonemappingParam = 0;
@@ -38,10 +43,13 @@ public class EncodingOptions
         VppTonemappingContrast = 1;
         H264Crf = 23;
         H265Crf = 28;
+        EncoderPreset = EncoderPreset.auto;
         DeinterlaceDoubleRate = false;
-        DeinterlaceMethod = "yadif";
+        DeinterlaceMethod = DeinterlaceMethod.yadif;
         EnableDecodingColorDepth10Hevc = true;
         EnableDecodingColorDepth10Vp9 = true;
+        EnableDecodingColorDepth10HevcRext = false;
+        EnableDecodingColorDepth12HevcRext = false;
         // Enhanced Nvdec or system native decoder is required for DoVi to SDR tone-mapping.
         EnableEnhancedNvdecDecoder = true;
         PreferSystemNativeHwDecoder = true;
@@ -51,8 +59,10 @@ public class EncodingOptions
         AllowHevcEncoding = false;
         AllowAv1Encoding = false;
         EnableSubtitleExtraction = true;
-        AllowOnDemandMetadataBasedKeyframeExtractionForExtensions = new[] { "mkv" };
-        HardwareDecodingCodecs = new string[] { "h264", "vc1" };
+        SubtitleExtractionTimeoutMinutes = 30;
+        AllowOnDemandMetadataBasedKeyframeExtractionForExtensions = ["mkv"];
+        HardwareDecodingCodecs = ["h264", "vc1"];
+        HlsAudioSeekStrategy = HlsAudioSeekStrategy.TrimCopiedAudio;
     }
 
     /// <summary>
@@ -118,7 +128,7 @@ public class EncodingOptions
     /// <summary>
     /// Gets or sets the hardware acceleration type.
     /// </summary>
-    public string HardwareAccelerationType { get; set; }
+    public HardwareAccelerationType HardwareAccelerationType { get; set; }
 
     /// <summary>
     /// Gets or sets the FFmpeg path as set by the user via the UI.
@@ -136,6 +146,11 @@ public class EncodingOptions
     public string VaapiDevice { get; set; }
 
     /// <summary>
+    /// Gets or sets the QSV device.
+    /// </summary>
+    public string QsvDevice { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether tonemapping is enabled.
     /// </summary>
     public bool EnableTonemapping { get; set; }
@@ -146,19 +161,24 @@ public class EncodingOptions
     public bool EnableVppTonemapping { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether videotoolbox tonemapping is enabled.
+    /// </summary>
+    public bool EnableVideoToolboxTonemapping { get; set; }
+
+    /// <summary>
     /// Gets or sets the tone-mapping algorithm.
     /// </summary>
-    public string TonemappingAlgorithm { get; set; }
+    public TonemappingAlgorithm TonemappingAlgorithm { get; set; }
 
     /// <summary>
     /// Gets or sets the tone-mapping mode.
     /// </summary>
-    public string TonemappingMode { get; set; }
+    public TonemappingMode TonemappingMode { get; set; }
 
     /// <summary>
     /// Gets or sets the tone-mapping range.
     /// </summary>
-    public string TonemappingRange { get; set; }
+    public TonemappingRange TonemappingRange { get; set; }
 
     /// <summary>
     /// Gets or sets the tone-mapping desaturation.
@@ -198,7 +218,7 @@ public class EncodingOptions
     /// <summary>
     /// Gets or sets the encoder preset.
     /// </summary>
-    public string EncoderPreset { get; set; }
+    public EncoderPreset EncoderPreset { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether the framerate is doubled when deinterlacing.
@@ -208,7 +228,7 @@ public class EncodingOptions
     /// <summary>
     /// Gets or sets the deinterlace method.
     /// </summary>
-    public string DeinterlaceMethod { get; set; }
+    public DeinterlaceMethod DeinterlaceMethod { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether 10bit HEVC decoding is enabled.
@@ -219,6 +239,16 @@ public class EncodingOptions
     /// Gets or sets a value indicating whether 10bit VP9 decoding is enabled.
     /// </summary>
     public bool EnableDecodingColorDepth10Vp9 { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether 8/10bit HEVC RExt decoding is enabled.
+    /// </summary>
+    public bool EnableDecodingColorDepth10HevcRext { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether 12bit HEVC RExt decoding is enabled.
+    /// </summary>
+    public bool EnableDecodingColorDepth12HevcRext { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether the enhanced NVDEC is enabled.
@@ -261,6 +291,11 @@ public class EncodingOptions
     public bool EnableSubtitleExtraction { get; set; }
 
     /// <summary>
+    /// Gets or sets the timeout for subtitle extraction in minutes.
+    /// </summary>
+    public int SubtitleExtractionTimeoutMinutes { get; set; }
+
+    /// <summary>
     /// Gets or sets the codecs hardware encoding is used for.
     /// </summary>
     public string[] HardwareDecodingCodecs { get; set; }
@@ -269,4 +304,10 @@ public class EncodingOptions
     /// Gets or sets the file extensions on-demand metadata based keyframe extraction is enabled for.
     /// </summary>
     public string[] AllowOnDemandMetadataBasedKeyframeExtractionForExtensions { get; set; }
+
+    /// <summary>
+    /// Gets or sets the method used for audio seeking in HLS.
+    /// </summary>
+    [DefaultValue(HlsAudioSeekStrategy.TrimCopiedAudio)]
+    public HlsAudioSeekStrategy HlsAudioSeekStrategy { get; set; }
 }

@@ -1,3 +1,4 @@
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Model.Querying;
@@ -13,7 +14,7 @@ namespace Emby.Server.Implementations.Sorting
         /// Gets the name.
         /// </summary>
         /// <value>The name.</value>
-        public string Name => ItemSortBy.ProductionYear;
+        public ItemSortBy Type => ItemSortBy.ProductionYear;
 
         /// <summary>
         /// Compares the specified x.
@@ -38,7 +39,7 @@ namespace Emby.Server.Implementations.Sorting
                 return 0;
             }
 
-            if (x.ProductionYear.HasValue)
+            if (x.ProductionYear is not null)
             {
                 return x.ProductionYear.Value;
             }

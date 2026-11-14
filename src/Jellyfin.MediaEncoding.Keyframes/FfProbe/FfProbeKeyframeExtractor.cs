@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Text;
 
 namespace Jellyfin.MediaEncoding.Keyframes.FfProbe;
 
@@ -11,8 +12,6 @@ namespace Jellyfin.MediaEncoding.Keyframes.FfProbe;
 /// </summary>
 public static class FfProbeKeyframeExtractor
 {
-    private const string DefaultArguments = "-fflags +genpts -v error -skip_frame nokey -show_entries format=duration -show_entries stream=duration -show_entries packet=pts_time,flags -select_streams v -of csv \"{0}\"";
-
     /// <summary>
     /// Extracts the keyframes using the ffprobe executable at the specified path.
     /// </summary>
@@ -26,10 +25,14 @@ public static class FfProbeKeyframeExtractor
             StartInfo = new ProcessStartInfo
             {
                 FileName = ffProbePath,
-                Arguments = string.Format(CultureInfo.InvariantCulture, DefaultArguments, filePath),
+                Arguments = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "-fflags +genpts -v error -skip_frame nokey -show_entries format=duration -show_entries stream=duration -show_entries packet=pts_time,flags -select_streams v -of csv \"{0}\"",
+                    filePath),
 
                 CreateNoWindow = true,
                 UseShellExecute = false,
+                StandardOutputEncoding = Encoding.UTF8,
                 RedirectStandardOutput = true,
 
                 WindowStyle = ProcessWindowStyle.Hidden,
@@ -41,6 +44,15 @@ public static class FfProbeKeyframeExtractor
         try
         {
             process.Start();
+            try
+            {
+                process.PriorityClass = ProcessPriorityClass.BelowNormal;
+            }
+            catch
+            {
+                // We do not care if process priority setting fails
+                // Ideally log a warning but this does not have a logger available
+            }
 
             return ParseStream(process.StandardOutput);
         }
